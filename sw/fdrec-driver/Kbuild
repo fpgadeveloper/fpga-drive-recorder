@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: GPL-2.0-only OR MIT
+# Kbuild for the out-of-tree fdrec module.
+#
+# The shared headers (fdrec_regs.h, fdrec_uapi.h) live in the repository's
+# include/ directory, two levels up. The Yocto recipe unpacks sw/fdrec-driver
+# and include/ with the same relative layout, so the path works in both places.
+# Override with FDREC_INCLUDE=<dir> when building from somewhere else.
+FDREC_INCLUDE ?= $(src)/../../include
+
+obj-m := fdrec.o
+ccflags-y += -I$(FDREC_INCLUDE)

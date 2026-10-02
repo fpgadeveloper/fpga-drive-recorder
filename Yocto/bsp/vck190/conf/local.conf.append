@@ -1,0 +1,57 @@
+# Copyright (C) 2025-2026, Opsero Electronic Design Inc.  All rights reserved.
+#
+# SPDX-License-Identifier: MIT
+
+# FPGA Drive Recorder reference design overrides for VCK190, EDF flow.
+# (Ported from fpga-drive-aximm-pcie Yocto/bsp/vck190, HW-validated there.)
+#
+# This board uses the gen-machineconf "parse-sdt" flow (AMD's recommended
+# path), the same flow now used for every zynqMP target.
+# Yocto/scripts/configure-build.sh generates a System Device Tree from the
+# Vivado XSA and runs gen-machineconf to produce a *custom* MACHINE
+# (fdrec-<target>) whose device tree -- PS, PL, and the per-domain DTS the
+# PLM/PSM firmware build from -- is derived directly from the hardware.
+# MACHINE is therefore NOT pinned here; it is set by configure-build.
+# (bsp/vck190 serves every vck190_* target; each gets its own MACHINE/SDT
+# from its own XSA.)
+#
+# Consequences of the parse-sdt flow:
+#   - The PL hardware (xilinx_qdma PCIe Root Ports, the fdrec AXI DMA and
+#     fdrec_core register block) is captured by the SDT's
+#     pl.dtsi and lopper-merged into the generated Linux device tree, so no
+#     hand-curated PL system-user.dtsi is needed. system-user.dtsi carries
+#     SoC-side board fixups plus the opsero,fdrec binding of the fdrec_core
+#     node (compatible + dmas).
+#   - The Vivado boot artifact (.pdi) is extracted into the SDT and wired
+#     automatically; because no PL overlay is requested, fpga-overlay is left
+#     out of MACHINE_FEATURES and the bitstream/PDI is embedded into BOOT.BIN.
+#   - DISTRO is set by the amd-edf template; IMAGE_FSTYPES by edf-linux-disk-image.
+#   - The Versal EDF wks (edf-disk-single-rootfs-efi.wks) partitions the card
+#     as esp(vfat)/storage(vfat)/root(ext4); bootimg-efi-amd populates the esp
+#     with BOOT.BIN + systemd-boot directly (no manual BOOT.BIN copy step).
+
+# Kernel command line. APPEND is NOT read by the EDF boot flow. This BSP boots
+# U-Boot -> boot.scr (CONFIG_BOOTCOMMAND in meta-user/recipes-bsp/u-boot/files/
+# fpgadrv-bootcmd.cfg), and the kernel arguments (including cma=1536M and
+# clk_ignore_unused) are set in meta-user/recipes-bsp/u-boot/files/fpgadrv-boot.cmd.
+# BSP_EXTRA_BOOTARGS is appended to that script's `setenv bootargs` line by
+# meta-user/recipes-bsp/u-boot/u-boot-edf-scr_%.bbappend (same variable name as
+# the ZynqMP BSPs, different mechanism: on Versal boot.cmd is our own file).
+#
+# FDREC_HUGEPAGES: number of 2 MB hugepages reserved at boot for the fdrec
+# recording/playback buffers (default 256 = 512 MB; the default ring of
+# fdrec/fdplay, 32 x 8 MB = 256 MB, needs 128; only one of them can run at a
+# time). The VCK190 has 8 GB of DDR4, so 512 (1 GB) is a comfortable option for
+# larger rings. Override it in local.conf before building, or change it at run
+# time with: echo <N> > /proc/sys/vm/nr_hugepages
+# (cma=1536M stays in fpgadrv-boot.cmd, as in the base design.)
+FDREC_HUGEPAGES ?= "256"
+BSP_EXTRA_BOOTARGS = "hugepagesz=2M hugepages=${FDREC_HUGEPAGES}"
+
+# Hostname. meta-amd-edf's distro conf sets hostname:pn-base-files:amd-edf =
+# "amd-edf"; it is parsed after local.conf and its extra override outranks a
+# plain hostname:pn-base-files, so use :forcevariable (last in OVERRIDES).
+hostname:pn-base-files:forcevariable = "vck190-fdrec-2025-2"
+
+# Reserve space in the rootfs for the toolset we install at image time.
+IMAGE_ROOTFS_EXTRA_SPACE = "524288"

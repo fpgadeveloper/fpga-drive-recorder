@@ -1,0 +1,3 @@
+[submodule "submodules/avnet-bdf"]
+	path = submodules/avnet-bdf
+	url = https://github.com/fpgadeveloper/avnet-bdf.git

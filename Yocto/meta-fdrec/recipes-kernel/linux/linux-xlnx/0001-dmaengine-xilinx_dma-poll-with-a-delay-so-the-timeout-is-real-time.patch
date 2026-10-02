@@ -1,0 +1,85 @@
+From: Jeff Johnson <jjohnson@opsero.com>
+Date: Fri, 2 Oct 2026 17:30:00 -0400
+Subject: [PATCH] dmaengine: xilinx_dma: poll with a delay so the timeout is
+ real time
+
+All register polls in this driver go through xilinx_dma_poll_timeout(),
+i.e. readl_poll_timeout_atomic(), with delay_us = 0 and
+timeout_us = XILINX_DMA_LOOP_COUNT (1000000). read_poll_timeout_atomic()
+does not use timekeeping: it subtracts delay_us * 1000 ns per iteration
+when a delay is given, and otherwise only 1 ns per iteration. With a zero
+delay the intended 1 s timeout therefore becomes 1e9 register reads.
+
+On an AXI DMA whose S2MM channel is stopped mid-packet (the stream source
+stalled with buffer descriptors still owned by the engine), DMASR.HALTED
+never sets, and xilinx_dma_stop_transfer() spins for 1e9 AXI-Lite reads,
+about 7 minutes on a ZynqMP, with preemption off. The CPU produces RCU
+stall reports and the system is unresponsive until the poll finally gives
+up ("Cannot stop channel ...: 10008") and xilinx_dma_chan_reset() recovers
+the channel, which it does immediately.
+
+Poll with a 1 us delay. The budget is then consumed in real time, so a
+channel that cannot halt or reset is reported after about 1 s, as the
+timeout intends. The delay only applies when the first read does not meet
+the condition, so polls that complete immediately (the common case,
+e.g. xilinx_dma_start() on every transfer start) are not slowed down.
+
+Upstream-Status: Pending
+Signed-off-by: Jeff Johnson <jjohnson@opsero.com>
+---
+ drivers/dma/xilinx/xilinx_dma.c | 15 +++++++++++----
+ 1 file changed, 11 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/dma/xilinx/xilinx_dma.c b/drivers/dma/xilinx/xilinx_dma.c
+--- a/drivers/dma/xilinx/xilinx_dma.c
++++ b/drivers/dma/xilinx/xilinx_dma.c
+@@ -165,6 +165,13 @@
+ 
+ /* Delay loop counter to prevent hardware failure */
+ #define XILINX_DMA_LOOP_COUNT		1000000
++/*
++ * Delay between register polls. readl_poll_timeout_atomic() does not use
++ * timekeeping: with a zero delay it decrements its nanosecond budget by one
++ * per iteration, so XILINX_DMA_LOOP_COUNT would allow 1e9 register reads
++ * (minutes on an AXI-Lite slave) instead of one second.
++ */
++#define XILINX_DMA_POLL_DELAY_US	1
+ 
+ /* AXI DMA Specific Registers/Offsets */
+ #define XILINX_DMA_REG_SRCDSTADDR	0x18
+@@ -1312,7 +1319,7 @@
+ 
+ 	/* Wait for the hardware to halt */
+ 	return xilinx_dma_poll_timeout(chan, XILINX_DMA_REG_DMASR, val,
+-				       val & XILINX_DMA_DMASR_HALTED, 0,
++				       val & XILINX_DMA_DMASR_HALTED, XILINX_DMA_POLL_DELAY_US,
+ 				       XILINX_DMA_LOOP_COUNT);
+ }
+ 
+@@ -1327,7 +1334,7 @@
+ 	u32 val;
+ 
+ 	return xilinx_dma_poll_timeout(chan, XILINX_DMA_REG_DMASR, val,
+-				       val & XILINX_DMA_DMASR_IDLE, 0,
++				       val & XILINX_DMA_DMASR_IDLE, XILINX_DMA_POLL_DELAY_US,
+ 				       XILINX_DMA_LOOP_COUNT);
+ }
+ 
+@@ -1344,7 +1351,7 @@
+ 
+ 	/* Wait for the hardware to start */
+ 	err = xilinx_dma_poll_timeout(chan, XILINX_DMA_REG_DMASR, val,
+-				      !(val & XILINX_DMA_DMASR_HALTED), 0,
++				      !(val & XILINX_DMA_DMASR_HALTED), XILINX_DMA_POLL_DELAY_US,
+ 				      XILINX_DMA_LOOP_COUNT);
+ 
+ 	if (err) {
+@@ -1755,7 +1762,7 @@
+ 
+ 	/* Wait for the hardware to finish reset */
+ 	err = xilinx_dma_poll_timeout(chan, XILINX_DMA_REG_DMACR, tmp,
+-				      !(tmp & XILINX_DMA_DMACR_RESET), 0,
++				      !(tmp & XILINX_DMA_DMACR_RESET), XILINX_DMA_POLL_DELAY_US,
+ 				      XILINX_DMA_LOOP_COUNT);
+ 
+ 	if (err) {

@@ -1,0 +1,98 @@
+// SPDX-License-Identifier: MIT
+// Copyright (C) 2025-2026, Opsero Electronic Design Inc.  All rights reserved.
+
+/*
+ * SoC-side / PL device-tree fixups for VCK190, layered on top of the
+ * gen-machineconf / lopper-generated <...>-linux.dts (which already carries
+ * the PS config and the PL xilinx_qdma PCIe Root Ports from the XSA via
+ * pl.dtsi). Scoped to the Linux domain by device-tree.bbappend.
+ *
+ * PCIe outbound-window fix (qdma_0 / qdma_1 `ranges`):
+ *   The SDT/lopper-generated `ranges` set the PCI base address to 0x0 (i.e.
+ *   PCI 0x0 -> CPU 0xa8000000), but the Versal QDMA bridge forwards CPU
+ *   addresses 1:1 to the PCIe bus. With the mismatched ranges the kernel
+ *   assigns endpoint BARs near PCI 0x0 while CPU accesses through the window
+ *   land at PCI 0xa8000000 -> nothing responds -> AXI decode error surfaces
+ *   as an Asynchronous SError and the kernel panics in nvme_pci_enable.
+ *   PetaLinux's HSI-generated DT uses 1:1 ranges (PCI addr == CPU addr); we
+ *   override to match. (Confirmed on hardware: with this fix both QDMA Root
+ *   Ports enumerate and both NVMe SSDs probe cleanly.)
+ *
+ *   Format: <pci_addr(3 cells) cpu_addr(2 cells) size(2 cells)>; first entry
+ *   is the 32-bit MEM window, second is the 64-bit (prefetchable) window.
+ */
+
+&qdma_0 {
+	ranges = <0x02000000 0x0 0xa8000000  0x0 0xa8000000  0x0 0x04000000>,
+		 <0x43000000 0x4 0x80000000  0x4 0x80000000  0x0 0x40000000>;
+};
+
+&qdma_1 {
+	ranges = <0x02000000 0x0 0xac000000  0x0 0xac000000  0x0 0x04000000>,
+		 <0x43000000 0x4 0xc0000000  0x4 0xc0000000  0x0 0x40000000>;
+};
+
+/* Board RJ45s (GEM0 = u198 PHY, GEM1 = u134 PHY): the SDT flow does not
+ * describe the board-level TI DP83867 PHYs, so Linux falls back to the
+ * Generic PHY driver and the RGMII clock delays are never programmed -
+ * the link negotiates 1G but passes no packets. Both PHYs sit on GEM0's
+ * MDIO bus (GEM1 has no MDIO: xlnx,has-mdio=0, matching the board).
+ * Values from the official versal-vmk180-revA.dts (which vck190 dts
+ * includes); reset-gpios omitted because the SDT device tree does not
+ * define the gpio1 label - the PHYs power up out of reset from straps.
+ * Fixed MACs (one per board, +1 for GEM1)
+ * replace the random ones the SDT flow leaves us with, keeping DHCP
+ * leases stable across boots.
+ * Ported from the 2x-qsfp28-fmc vck190 Yocto BSP (HW-verified on VCK190).
+ */
+&gem0 {
+	local-mac-address = [00 0a 35 06 21 90];
+	phy-handle = <&gem0_phy>;
+	mdio {
+		#address-cells = <1>;
+		#size-cells = <0>;
+		gem0_phy: ethernet-phy@1 {
+			compatible = "ethernet-phy-id2000.a231";
+			reg = <1>;
+			ti,rx-internal-delay = <0xb>;
+			ti,tx-internal-delay = <0xa>;
+			ti,fifo-depth = <0x1>;
+			ti,dp83867-rxctrl-strap-quirk;
+		};
+		gem1_phy: ethernet-phy@2 {
+			compatible = "ethernet-phy-id2000.a231";
+			reg = <2>;
+			ti,rx-internal-delay = <0xb>;
+			ti,tx-internal-delay = <0xa>;
+			ti,fifo-depth = <0x1>;
+			ti,dp83867-rxctrl-strap-quirk;
+		};
+	};
+};
+&gem1 {
+	local-mac-address = [00 0a 35 06 21 91];
+	phy-handle = <&gem1_phy>;
+};
+
+/*
+ * FPGA Drive Recorder: bind the fdrec kernel driver (Yocto/meta-fdrec,
+ * sw/fdrec-driver) to the fdrec_core register block.
+ *
+ * sdtgen emits the module-reference block from the XSA under amba_pl as
+ *   fdrec_core_fdrec_core_0: fdrec_core@<addr> { compatible = "xlnx,fdrec-core-1.0"; reg = <...>; }
+ * and the AXI DMA as axi_dma_0 (SG, MM2S + S2MM, xlnx,sg-length-width = <26>,
+ * xlnx,addrwidth = <0x40>, each channel's interrupt on its dma-channel child,
+ * not dma-coherent: the PL masters reach DDR through the NoC without CCI).
+ * Keep the generated reg; replace the generic compatible and add both
+ * channels. xilinx_dma numbers the channels of an AXI DMA 0 = MM2S,
+ * 1 = S2MM (of_dma_xilinx_xlate), so:
+ *   "rx" (record,   S2MM) = <&axi_dma_0 1>
+ *   "tx" (playback, MM2S) = <&axi_dma_0 0>
+ * Same labels as the ZynqMP (uzev) design; if the block design is renamed,
+ * these labels change with it.
+ */
+&fdrec_core_fdrec_core_0 {
+	compatible = "opsero,fdrec";
+	dmas = <&axi_dma_0 1>, <&axi_dma_0 0>;
+	dma-names = "rx", "tx";
+};

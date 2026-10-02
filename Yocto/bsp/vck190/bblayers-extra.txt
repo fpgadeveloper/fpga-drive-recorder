@@ -1,0 +1,3 @@
+# Extra Yocto layers for this board, one repo-root-relative path per line.
+# Read by Yocto/scripts/configure-build.sh.
+Yocto/meta-fdrec
