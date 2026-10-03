@@ -603,7 +603,8 @@ Notes:
   step, sits at the sink ceiling (one confirmation run of three had 1046 underflow ticks).
 * At 1000 MB/s: `fdrec` 24 % of a core (970 EVO) and 30 % (RAID0); `fdplay` 16 / 20 / 22 %
   (970 EVO / 950 PRO / RAID0).
-* The SSD on the first Root Port (970 EVO) had one NVMe I/O queue, the other four, as on `uzev`.
+* The 970 EVO had one NVMe I/O queue and the 950 PRO four, as on the other boards (a property
+  of the 970 EVO, see [Where the bottlenecks are](#3-the-nvme-queue-count)).
 
 Variations (dd timed like the scripts):
 
@@ -737,12 +738,13 @@ reads 3217 MB/s with fio and the 950 PRO 2264 MB/s, close to or above their rati
 
 ### 3. The NVMe queue count
 
-On `uzev`, the NVMe driver set up the SSD on the first Root Port with a single I/O queue
-(`nvme nvme0: 1/0/0 default/read/poll queues` in the kernel log), and the one on the second
-Root Port with four. With one queue, every command and completion of that drive is handled
-through one queue and one interrupt, on one core: a real limiter for parallel I/O to that
-drive. More queues need more MSI interrupt vectors in the Root Port configuration, which is a
-change to the PCIe design inherited from fpga-drive-aximm-pcie.
+The Samsung 970 EVO 250GB used on the bench is set up by the NVMe driver with a single I/O
+queue (`nvme nvme0: 1/0/0 default/read/poll queues` in the kernel log). This is a property of
+that drive: it happened on all three boards (`uzev`, `zcu106_hpc0` and the Versal
+`vck190_fmcp1`), while the 950 PRO got two to four queues on every board. With one queue, every
+command and completion of the drive goes through one queue and one interrupt, on one core: a
+limiter for parallel I/O to that drive. Other drives expose more queues; check yours with
+`dmesg | grep queues`.
 
 ### 4. RAID0 and the filesystem
 
@@ -786,7 +788,7 @@ the ring.
 * RAID0 of two good, identical drives.
 * More buffers (`--buffers`, `--buf-size`) to ride out latency spikes.
 * Larger I/Os or more requests in flight (`--buf-size`, `--qd`).
-* More NVMe I/O queues (MSI vectors in the Root Port design).
+* SSDs that expose several NVMe I/O queues.
 
 For CPU-less operation or rates beyond what Linux can sustain, hardware NVMe host IP is
 available from Missing Link Electronics. See their

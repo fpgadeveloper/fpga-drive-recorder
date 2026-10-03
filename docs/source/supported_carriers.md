@@ -70,8 +70,6 @@ recorder.
 * The `zcu106_hpc0` design uses the HPC0 FMC connector, which supports two SSDs, each with an
   independent 4-lane PCIe Gen3 interface (XDMA Root Ports).
 * The design builds with the free Vivado Standard Edition (no license needed).
-* The SSD on the first Root Port is set up by the NVMe driver with a single I/O queue, as on
-  the UltraZed-EV (see [Where the bottlenecks are](benchmarks.md#where-the-bottlenecks-are)).
 
 ### VCK190
 

@@ -16,6 +16,12 @@ An SSD that supports a higher PCIe generation than the design links at the desig
 | Samsung 970 EVO       | 250 GB   | 1B2QEXE7 | single drive, RAID0, playback |
 | Samsung 950 PRO       | 256 GB   | 1B0QBXX7 | single drive, RAID0, playback |
 
+Observation on the 970 EVO 250GB: on every board tested, the Linux NVMe driver set it up with a
+single I/O queue (`nvme nvme0: 1/0/0 default/read/poll queues` in `dmesg`), whereas the 950 PRO
+got two to four queues. The cause was not investigated; it is behaviour of this drive's
+firmware or controller, not of the design. With one queue, all of the drive's completions are
+handled on one CPU core (see [Where the bottlenecks are](benchmarks.md#3-the-nvme-queue-count)).
+
 The measured rates of both drives, alone and as a RAID0 pair, are on the
 [Benchmarks](benchmarks) page.
 
