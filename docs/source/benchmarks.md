@@ -269,6 +269,37 @@ reference design measures SSD throughput with four `dd` scripts, which are also 
 design's image (see [Test the design in Linux](linux_test.md#4-measure-the-ssds-with-the-dd-speed-test-scripts)).
 This section compares the two methods on the same board, SSDs and image.
 
+### At a glance
+
+All figures in MB/s (10⁶ bytes/s), `uzev`, 2026-10-02. **b** = burst (the write fits inside
+the drive's SLC write cache), **s** = sustained (the recording ran past the cache, or the drive
+has no cache cliff). Reads have no cache effect.
+
+| config | WRITE: drive ceiling (fio QD8, 4 GB) | WRITE: dd script (4 GB) | WRITE: fdrec highest clean (4 GB) | WRITE: dd (32 GB) | WRITE: fdrec sustained (32 GB) | READ: drive ceiling (fio QD8, 4 GB) | READ: dd script (4 GB) | READ: fdplay highest clean (4 GB) |
+|---|---|---|---|---|---|---|---|---|
+| 970 EVO 250GB | 1535 **b** | 1024 **b** | 1500 **b** | 460 (average across the cache end) | **250 s** | 1574 | 1398 | 1500 |
+| 950 PRO 256GB | 971 **s** | 948 **s** | 750 **s** (1000: clean in 2 of 3 runs) | 956 **s** | **750 s** | 1568 | 1267 | 1500 |
+| RAID0 (both) | 1936 **b** | 1302 **b** | 1750 **b** | 1176 (one run) | **500 s** | 2271 | 1705 | 2750 |
+
+| config | dd write: rate / % of one core / MB/s per % core | fdrec: rate / % of one core / MB/s per % core |
+|---|---|---|
+| 970 EVO 250GB | 1024 / 55 % / 18 | 1493 / 36 % / 41 |
+| 950 PRO 256GB | 948 / 53 % / 18 | 748 / 22 % / 35 |
+| RAID0 (both) | 1302 / 79 % / 16 | 1742 / 51 % / 34 |
+
+Selection rule: dd and fio cells are the median of three runs at their own speed (one run where
+marked); `fdrec` / `fdplay` cells are the highest 250 MB/s step that was clean over 4000 MiB
+(0 drops / 0 underflows) and, in the CPU table, the rate it achieved; "fdrec sustained" is the
+highest clean step of the 32 GB [fdbench.sh sweep](#sustained-recording-rate).
+
+How to read it: the "drive ceiling" columns show what the SSD itself delivered under Linux
+with 8 requests in flight. The dd and burst columns are short transfers that a consumer drive
+absorbs in its write cache; the bold sustained column is what you can record for as long as you
+like. The recorder figures are the strictest of all, because one late write anywhere in the
+recording makes a rate fail, and they cost about half the CPU of `dd` for writes. The
+[detailed tables](#results-uzev) and [why the figures differ](#why-the-figures-differ) follow,
+and [Where the bottlenecks are](#where-the-bottlenecks-are) explains what limits each figure.
+
 ### Method
 
 All measured on `uzev` on 2026-10-02, with the playback-capable image (register map 1.1),
@@ -407,6 +438,107 @@ negotiated speed and width (`lspci -vv`, see
 The sibling design's own documentation quotes lower `dd` figures for `uzev` (read 790–970,
 write ~585 MB/s); those were measured with a different SSD (Samsung 980 PRO) and an older
 image, and do not apply to this setup.
+
+For CPU-less operation or rates beyond what Linux can sustain, hardware NVMe host IP is
+available from Missing Link Electronics. See their
+[NVMe Streamer](https://www.missinglinkelectronics.com/ip-cores/nvme-streamer/).
+
+## Where the bottlenecks are
+
+Why don't you get the SSD's rated read and write speed? This section goes through the chain
+from the SSD to the fabric, in the order in which the limits usually bite. The numbers are
+the `uzev` measurements on this page (four Cortex-A53 cores at 1.1 GHz, PCIe Gen3 x4,
+Samsung 970 EVO 250GB and 950 PRO 256GB); the reasoning applies to every target.
+
+### 1. The SSD itself
+
+**Writes: the SLC cache, then the flash.** Samsung rates the 970 EVO 250GB at up to
+1500 MB/s sequential write, and 300 MB/s once its TurboWrite (SLC) cache is full
+([data sheet](https://download.semiconductor.samsung.com/resources/data-sheet/Samsung-NVMe-SSD-970-EVO-Data-Sheet_Rev.1.0.pdf)).
+That is what was measured: 1024 MB/s with `dd` and 1535 MB/s with fio over 4 GB, then
+about 330 MB/s after ~14 GB (a 32 GB `dd` averages 460 MB/s across the cache end). The
+950 PRO 256GB, rated at 900 MB/s write
+([Samsung](https://www.samsung.com/us/computer/memory-storage/MZ-V5P256BW)), has no such
+cliff: its ~955 MB/s is its real write rate, over 4 GB and over 32 GB alike.
+
+**Reads: the rating assumes a fast host with many commands outstanding.** The ratings
+(3400 MB/s for the 970 EVO, 2200 MB/s for the 950 PRO) are measured with many read commands
+in flight on a fast desktop host. With one request at a time (`dd`, queue depth 1) the
+950 PRO reads 1267 MB/s; with 8 in flight (fio, `fdplay`) about 1570 MB/s; the rest of the gap
+is the host (sections 2 and 3).
+
+**The recorder's criterion is the drive's worst moment.** A recording passes only if no beat
+is dropped over its whole length, so its rate is set by the drive's slowest stretch
+(garbage collection, the cache end, a write-latency spike), not by its average. That is why
+the sustained recording rates (970 EVO 250, 950 PRO 750, RAID0 500 MB/s over 32 GB) are below
+every average on this page.
+
+### 2. The host I/O path and the CPU
+
+Every write and read goes through the kernel's filesystem, block layer and NVMe driver, and
+that path costs CPU time per byte even without a data copy. `fdrec` uses about 2.5–3 % of one
+1.1 GHz Cortex-A53 core per 100 MB/s, almost all of it system time, and the cost grows
+linearly with the rate, so one core would saturate somewhere in the 3–4 GB/s region. `dd`
+additionally has the CPU produce every byte (zero-fill from `/dev/zero`) and runs one request
+at a time: about 5.5 % of a core per 100 MB/s, and on RAID0 a single `dd` is CPU-bound at
+~1.3 GB/s (80–90 % of a core). The AXI DMA writes DDR through a non-coherent port, so the
+driver does a cache-maintenance pass over each buffer (one invalidate after the DMA, one
+clean before the buffer goes back); that is part of the system time above. On Versal targets
+the processor is a dual-core Cortex-A72, with different headroom; figures follow once the
+VCK190 has been measured.
+
+### 3. The NVMe queue count
+
+On `uzev`, the NVMe driver set up the SSD on the first Root Port with a single I/O queue
+(`nvme nvme0: 1/0/0 default/read/poll queues` in the kernel log), and the one on the second
+Root Port with four. With one queue, every command and completion of that drive is handled
+through one queue and one interrupt, on one core: a real limiter for parallel I/O to that
+drive. More queues need more MSI interrupt vectors in the Root Port configuration, which is a
+change to the PCIe design inherited from fpga-drive-aximm-pcie.
+
+### 4. RAID0 and the filesystem
+
+With 512 KB chunks, md splits every 8 MB request into 16 stripe writes, alternating between
+the drives; the array then runs at twice the slower drive's rate (the 970 EVO's, once its cache
+is full). The md layer topped out at about 1.9 GB/s on `uzev`. On the filesystem side,
+`fdrec` preallocates the whole file (`fallocate`), so XFS does no allocation work during the
+recording, and an `fstrim` immediately before a recording can stall the first writes for more
+than 100 ms (see [the fstrim finding](#the-fstrim-finding-and-the-ring-size)).
+
+### 5. Latency budgets, not bandwidth
+
+Two buffers decide whether a short stall costs data, although neither limits throughput:
+
+* **The buffer ring** (buffers × buffer size) must cover the longest write-latency spike of
+  the drive at the recording rate. 16 × 8 MB = 128 MB lasts 75 ms at 1.7 GB/s, which was not
+  always enough after an `fstrim`; the default is now 32 × 8 MB (256 MB).
+* **The 64 KB fabric FIFO** only has to cover the AXI DMA's pause at each buffer boundary
+  (~15 µs, the interrupt latency), which it does up to ~4.4 GB/s
+  (see [the FIFO budget](apps.md#tuning-the-fifo-budget-at-buffer-boundaries)).
+
+Both set what "sustainable" means: a rate is sustainable if the drive's worst stall fits in
+the ring.
+
+### 6. What is not the bottleneck at these rates
+
+* **The PCIe link.** Gen3 x4 carries about 3.3 GB/s of payload (Gen4 x4 on the Versal
+  targets about 6.5 GB/s), above every figure here. Note that a Gen4 SSD in a Gen3 design is
+  capped at the Gen3 rate.
+* **The PS DDR memory.** A recording moves every byte through DDR twice (the AXI DMA writes it,
+  the SSD reads it), so 1.75 GB/s of recording is 3.5 GB/s of DDR traffic, well within the
+  bandwidth of a 64-bit DDR4 interface.
+* **The fabric datapath and the AXI DMA:** 128 bits at 250 MHz = 4 GB/s. The test pattern
+  generator tops out at 3.2 GB/s (200 MHz × 16 bytes), a design parameter (`src_clk`).
+
+### 7. How to get more
+
+* SSDs without an SLC cliff: drives designed for sustained writes (enterprise, industrial,
+  MLC or SLC flash), or larger capacities with a bigger cache. See
+  [supported SSDs](supported_ssds.md#choosing-ssds-for-recording).
+* RAID0 of two good, identical drives.
+* More buffers (`--buffers`, `--buf-size`) to ride out latency spikes.
+* Larger I/Os or more requests in flight (`--buf-size`, `--qd`).
+* More NVMe I/O queues (MSI vectors in the Root Port design).
 
 For CPU-less operation or rates beyond what Linux can sustain, hardware NVMe host IP is
 available from Missing Link Electronics. See their

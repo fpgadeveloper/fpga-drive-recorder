@@ -7,7 +7,7 @@ filesystem, and the processor only does bookkeeping while the data moves from th
 the SSD without being copied by the CPU. It is not a fabric NVMe host engine: every write
 and read goes through the Linux block layer, the NVMe driver and the filesystem, so the
 recorder needs a running Linux system, and its rate is bounded by the SSDs and by the Linux
-I/O path.
+I/O path (see [Where the bottlenecks are](benchmarks.md#where-the-bottlenecks-are)).
 
 For CPU-less operation or rates beyond what Linux can sustain, hardware NVMe host IP is
 available from Missing Link Electronics. See Missing Link Electronics'

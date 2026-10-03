@@ -62,6 +62,15 @@ For CPU-less operation or rates beyond what Linux can sustain, hardware NVMe hos
 available from Missing Link Electronics: see their
 [NVMe Streamer](https://www.missinglinkelectronics.com/ip-cores/nvme-streamer/).
 
+## Performance
+
+What the recorder sustains depends on the SSDs far more than on the FPGA: consumer SSDs write
+fast only until their SLC cache is full, and the recorder's rate is the drive's worst moment
+over the whole recording. Measured rates per target and SSD are on the
+[Benchmarks](benchmarks) page, and
+[Where the bottlenecks are](benchmarks.md#where-the-bottlenecks-are) explains why you do not
+get an SSD's rated speed and what to do about it.
+
 ## Hardware platforms
 
 The design supports the target boards listed below. More Linux-capable targets of
