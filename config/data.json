@@ -66,6 +66,28 @@
     },
     {
       "publish": true,
+      "label": "zcu106_hpc0",
+      "board": "ZCU106",
+      "link": "https://www.xilinx.com/zcu106",
+      "url": "xilinx.com",
+      "boardname": "zcu106",
+      "ip": "xdma",
+      "lanes": [
+        "X4",
+        "X4"
+      ],
+      "ports": "SSD1 & SSD2",
+      "connector": "HPC0",
+      "group": "zu",
+      "petalinux": false,
+      "yocto": true,
+      "baremetal": false,
+      "license": false,
+      "flashsize": "0",
+      "flashintf": "0"
+    },
+    {
+      "publish": true,
       "label": "vck190_fmcp1",
       "board": "VCK190",
       "link": "https://www.xilinx.com/vck190",

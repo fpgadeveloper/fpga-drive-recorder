@@ -12,6 +12,7 @@ bootimages/
 Yocto/offline.txt
 # UPDATER START
 Vivado/uzev/
+Vivado/zcu106_hpc0/
 Vivado/vck190_fmcp1/
 # UPDATER END
 dfx_runtime.txt

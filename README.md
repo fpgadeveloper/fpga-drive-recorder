@@ -70,6 +70,7 @@ To build and test the design you will need:
 | Target board          | Target design   | M2 Slot 1<br> PCIe Lanes | M2 Slot 2<br> PCIe Lanes | FMC Slot    | Standalone | PetaLinux | Yocto | Vivado<br> Edition | IP<br>License |
 |-----------------------|-----------------|--------------------------|--------------------------|-------------|-------|-------|-------|-------|-------|
 | [UltraZed-EV Carrier] | `uzev`          | 4     | 4     | HPC         | :x:         | :x:         | :white_check_mark: | Standard :free: | -     |
+| [ZCU106]              | `zcu106_hpc0`   | 4     | 4     | HPC0        | :x:         | :x:         | :white_check_mark: | Standard :free: | -     |
 
 ### Versal designs
 
@@ -78,6 +79,7 @@ To build and test the design you will need:
 | [VCK190]              | `vck190_fmcp1`  | 4     | 4     | FMCP1       | :x:         | :x:         | :white_check_mark: | Enterprise | -     |
 
 [UltraZed-EV Carrier]: https://www.xilinx.com/products/boards-and-kits/1-1s78dxb.html
+[ZCU106]: https://www.xilinx.com/zcu106
 [VCK190]: https://www.xilinx.com/vck190
 <!-- updater end -->
 

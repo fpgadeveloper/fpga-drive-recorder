@@ -38,6 +38,7 @@ set_param board.repoPaths $repo_paths
 # Possible targets
 # UPDATER START
 dict set target_dict uzev { avnet.com ultrazed_7ev_cc { X4 X4 } zynqmp }
+dict set target_dict zcu106_hpc0 { xilinx.com zcu106 { X4 X4 } zynqmp }
 dict set target_dict vck190_fmcp1 { xilinx.com vck190 { X4 X4 } versal }
 # UPDATER END
 

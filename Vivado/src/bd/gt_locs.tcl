@@ -16,3 +16,7 @@ dict set gt_loc_dict vck190_fmcp1 0 quad GTY_Quad_201
 dict set gt_loc_dict vck190_fmcp1 0 pcie X1Y0
 dict set gt_loc_dict vck190_fmcp1 1 quad GTY_Quad_202
 dict set gt_loc_dict vck190_fmcp1 1 pcie X1Y2
+dict set gt_loc_dict zcu106_hpc0 0 quad GTH_Quad_226
+dict set gt_loc_dict zcu106_hpc0 0 pcie X0Y1
+dict set gt_loc_dict zcu106_hpc0 1 quad GTH_Quad_227
+dict set gt_loc_dict zcu106_hpc0 1 pcie X0Y0
