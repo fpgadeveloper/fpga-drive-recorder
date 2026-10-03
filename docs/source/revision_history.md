@@ -22,5 +22,6 @@ Yocto / EDF 2025.2 flow (no PetaLinux flow, no standalone application). First ta
 * Second target: `vck190_fmcp1` (VCK190, FMCP1, Versal, PCIe Gen4 x4 per slot), with the same
   recorder datapath.
 * Third target: `zcu106_hpc0` (ZCU106, HPC0, Zynq UltraScale+, PCIe Gen3 x4 per slot).
+* vck190_fmcp1: PCIe PIPE pipeline 2 stages (timing closure).
 * Documentation: this site, with generated block diagrams, the register map, the driver
   and file-format references, and the benchmarks measured on `uzev`.

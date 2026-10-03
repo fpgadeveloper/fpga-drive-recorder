@@ -292,8 +292,8 @@ with record and playback), whole design including both PCIe root ports:
 
 | Resource | Used | Available | % |
 |---|---|---|---|
-| CLB LUTs | 67 243 | 899 840 | 7.5 |
-| CLB registers | 101 897 | 1 799 680 | 5.7 |
+| CLB LUTs | 67 323 | 899 840 | 7.5 |
+| CLB registers | 103 072 | 1 799 680 | 5.7 |
 | Block RAM tiles (36 Kb) | 121 | 967 | 12.5 |
 | UltraRAM | 24 | 463 | 5.2 |
 | DSP | 0 | 1 968 | 0 |
@@ -301,10 +301,12 @@ with record and playback), whole design including both PCIe root ports:
 The UltraRAM is used by the QDMA root ports; the recorder's FIFOs use block RAM, as on
 Zynq UltraScale+.
 
-The recorder's clock domains meet timing with margin (`dp_clk` WNS +0.819 ns, `src_clk`
-+1.382 ns; WHS +0.014 ns overall). The routed design has a 24 ps setup violation on four
-paths inside the second QDMA root port's PCIe PHY (`qdma_support_1/pcie_phy`, LTSSM state
-into the GT quad, clock `ch0_txoutclk_1`). This comes from the base design: its own
-`vck190_fmcp1` build has the same violation, and post-route physical optimization does not
-remove it. The boot image is the PDI inside the
-exported XSA (`Vivado/vck190_fmcp1/fdrec_wrapper.xsa`).
+Timing is met (WNS +0.054 ns, TNS 0, WHS +0.011 ns). The recorder's clock domains meet
+timing with margin (`dp_clk` WNS +0.916 ns, `src_clk` +1.511 ns). The PCIe PHY of each
+root port uses **2 PIPE pipeline stages** between the PCIE4 hard block and the GT quad
+(`pipe_line_stage` on `pcie`, `pipeline_stages` on `pcie_phy`, in `create_qdma_support`);
+with the single stage of the base design, the LTSSM state path into the GT quad of the
+second root port missed timing by 24 ps (`PCIE40_X1Y2` and `GTY_QUAD_X1Y2` sit in different
+clock regions). With 2 stages the PIPE clocks close with positive slack (`ch0_txoutclk`
++0.054 ns, `ch0_txoutclk_1` +0.091 ns). The boot image is the PDI inside the exported XSA
+(`Vivado/vck190_fmcp1/fdrec_wrapper.xsa`).
