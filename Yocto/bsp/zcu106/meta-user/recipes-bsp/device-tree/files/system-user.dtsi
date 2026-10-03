@@ -67,7 +67,8 @@
  *                                                   reg = <0x4 0x20010000 0x0 0x1000>; ... }
  * and the AXI DMA as axi_dma_0 (SG, MM2S + S2MM, xlnx,sg-length-width = <26>,
  * xlnx,addrwidth = <0x40>, each channel's interrupt on its dma-channel child,
- * not dma-coherent: S_AXI_HP2_FPD on uzev; verify the port on this board). Keep the generated reg; replace the
+ * not dma-coherent: S_AXI_HP2_FPD; S2MM = SPI 95, MM2S = SPI 96). Keep the
+ * generated reg; replace the
  * generic compatible and add both channels. xilinx_dma numbers the channels
  * of an AXI DMA 0 = MM2S, 1 = S2MM (of_dma_xilinx_xlate), so:
  *   "rx" (record,   S2MM) = <&axi_dma_0 1>
