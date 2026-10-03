@@ -54,7 +54,7 @@ sudo fdplay --rate 2000MB /mnt/rec/t.dat; echo rc=$?
   wait separately) and as the share of one core used by the transfer process.
 
 Results are given for `uzev` (Zynq UltraScale+) and `vck190_fmcp1` (Versal), both measured
-with the same two SSDs. Cells marked *pending (bench)* have not been measured yet.
+with the same two SSDs.
 
 ## Results: uzev (UltraZed-EV)
 
@@ -76,12 +76,17 @@ the drives left idle for 60 s. Design 1.0.
 | `uzev` | Samsung 970 EVO 250GB | single | 250 MB/s | 484 MB/s |
 | `uzev` | Samsung 950 PRO 256GB | single | 750 MB/s | 962 MB/s |
 | `uzev` | 970 EVO + 950 PRO | RAID0, 512K chunk | 500 MB/s | 1416 MB/s |
-| `vck190_fmcp1` | Samsung 970 EVO 250GB | single | *pending (bench)* | 484 MB/s |
-| `vck190_fmcp1` | Samsung 950 PRO 256GB | single | 750 MB/s clean in one 32 GB run (32 x 8 MB buffers); sweep *pending (bench)* | 949 MB/s |
-| `vck190_fmcp1` | 970 EVO + 950 PRO | RAID0, 512K chunk | *pending (bench)* | 1411 MB/s |
+| `vck190_fmcp1` | Samsung 970 EVO 250GB | single | 250 MB/s | 483 MB/s |
+| `vck190_fmcp1` | Samsung 950 PRO 256GB | single | 750 MB/s | 942 MB/s |
+| `vck190_fmcp1` | 970 EVO + 950 PRO | RAID0, 512K chunk | 500 MB/s | 1413 MB/s |
 
-The `vck190_fmcp1` fio references come from the [comparison runs](#results-vck190_fmcp1)
-(fresh filesystem, no trim); its `fdbench.sh` sweep is *pending (bench)*.
+`vck190_fmcp1` sweep: same method (`fdbench.sh`, 32 GB steps, `fstrim` + 60 s idle before each
+step), with the shipped default of 32 x 8 MB buffers. 970 EVO: 250 MB/s clean (FIFO high-water
+mark 215); 500 MB/s fails at 14.8 GB, the SLC cliff (385 MB/s achieved). 950 PRO: 750 MB/s
+clean (high-water mark 526); 1000 MB/s fails at the drive's ~950 MB/s limit. RAID0: 500 MB/s
+clean (high-water mark 323); 750 MB/s fails at 30.4 GB, when the 970 EVO's half of the stripe
+leaves its cache. In all six failing steps the gaps sum exactly to the header's drop count. The
+sustained rates are the same as on `uzev`: they are set by the SSDs.
 
 fio reference: `fio --name=w --rw=write --bs=8M --direct=1 --ioengine=io_uring --iodepth=8
 --size=32G --filename=/mnt/rec/fio.dat` on the freshly created filesystem, before the sweep.
@@ -154,13 +159,12 @@ queue depth 8. Each run plays a 10 GB test-pattern recording made at 1000 MB/s w
 | 2026-10-02 | 970 EVO + 950 PRO | RAID0, 512K chunk | 16 x 8 MB | **2000 MB/s** | 9/9 | 2200 MB/s (1 of 3 runs), 2400 MB/s (1 of 6), 2600 MB/s (1 of 2) | 2161-2498 MB/s; 3184 MB/s with hugepage fixed buffers |
 | 2026-10-02 | 970 EVO + 950 PRO | RAID0, 512K chunk | 32 x 8 MB | **2600 MB/s** | 6/6 | 2800 MB/s (1 of 1) | as above |
 | 2026-10-02 | 950 PRO 256GB | single | 16 x 8 MB | **1500 MB/s** | 4/4 | 1600 MB/s (1 of 3), 1700 MB/s (1 of 1) | 1583 MB/s; 1593 MB/s with hugepage fixed buffers |
-| `vck190_fmcp1` | 970 EVO + 950 PRO | RAID0, 512K chunk | 32 x 8 MB | *pending (bench)* (10 GB playbacks) | | | |
-| `vck190_fmcp1` | 950 PRO 256GB | single | 32 x 8 MB | *pending (bench)* (10 GB playbacks) | | | |
+| `vck190_fmcp1` | 970 EVO + 950 PRO | RAID0, 512K chunk | 32 x 8 MB and 16 x 8 MB | **3200 MB/s** (the sink maximum) | 3/3 each | none (no higher rate exists) | 3650–3871 MB/s |
+| `vck190_fmcp1` | 950 PRO 256GB | single | 32 x 8 MB | **2250 MB/s** | 3/3 | 2500 MB/s (41–49 M underflow ticks) | 2285–2291 MB/s |
 
-The rows with a date are `uzev`. The `vck190_fmcp1` playback rates measured so far are the
-4000 MiB runs of the [comparison](#results-vck190_fmcp1): RAID0 and the 970 EVO clean at the
-highest step tested (3000 MB/s, just under the 3.2 GB/s sink maximum), the 950 PRO clean at
-2250 MB/s.
+The rows with a date are `uzev` (measured 2026-10-02); the `vck190_fmcp1` rows were measured
+2026-10-03, also with 10 GB playbacks. On the VCK190 RAID0 plays back cleanly at the full sink
+rate of 3.2 GB/s. The 970 EVO alone reads 3264 MB/s with fio (10 GB) there.
 
 Read fio reference: `fio --name=rd --filename=<the recording> --readonly --rw=read --bs=8M
 --direct=1 --ioengine=io_uring --iodepth=8 --size=10G` on the same filesystem (two runs on
@@ -197,8 +201,20 @@ With 16 x 8 MB buffers:
 | `fdrec`, 1000 MB/s to the 970 EVO | about 2 % (user + system); the rest idle or I/O wait | `fdrec` 8 % of one core (3 s samples) |
 | `fdplay`, 1000 MB/s from RAID0 | 6 % (user + system + softirq), 17 % I/O wait | `fdplay` 24 % of one core (2 s samples) |
 
-These are `uzev` figures. For `vck190_fmcp1`, `top` samples of `fdrec` / `fdplay` are *pending (bench)*;
-its CPU figures measured over whole transfers are in the [comparison](#results-vck190_fmcp1).
+These are `uzev` figures. On `vck190_fmcp1` (two Cortex-A72 cores) the CPU was measured per
+core from `/proc/stat` over 10 GB transfers at 1000 MB/s (two runs each, 32 x 8 MB buffers):
+
+| transfer | per core (busy) | transfer process |
+|---|---|---|
+| `fdrec`, 1000 MB/s to the 970 EVO | core 0 10–10.4 %, core 1 5.7 % | `fdrec` 15.2 % of one core |
+| `fdrec`, 1000 MB/s to RAID0 | core 0 11 %, core 1 9–10 % | `fdrec` 17.6 % of one core |
+| `fdplay`, 1000 MB/s from the 970 EVO | runs on one core | `fdplay` 10.3 % of one core |
+| `fdplay`, 1000 MB/s from RAID0 | runs on one core | `fdplay` 13.2 % of one core |
+
+Nearly all of it is system time; the core the app runs on shows 81–89 % I/O wait (waiting, not
+busy). The two methods (`top` on `uzev`, `/proc/stat` per core here) are not directly comparable;
+the [comparison](#comparison-with-fpga-drive-aximm-pcie-dd-method) measures both boards the same
+way.
 
 There is one DMA interrupt per 8 MB buffer in both directions. The
 [comparison with the dd method](#comparison-with-fpga-drive-aximm-pcie-dd-method) below
@@ -297,9 +313,9 @@ has no cache cliff). Reads have no cache effect.
 | uzev: 970 EVO 250GB | 1535 **b** | 1024 **b** | 1500 **b** | 460 (average across the cache end) | **250 s** | 1574 | 1398 | 1500 |
 | uzev: 950 PRO 256GB | 971 **s** | 948 **s** | 750 **s** (1000: clean in 2 of 3 runs) | 956 **s** | **750 s** | 1568 | 1267 | 1500 |
 | uzev: RAID0 (both) | 1936 **b** | 1302 **b** | 1750 **b** | 1176 (one run) | **500 s** | 2271 | 1705 | 2750 |
-| vck190: 970 EVO 250GB | 1535 **b** | 1519 **b** | 1500 **b** | 492 (average across the cache end) | *pending (bench)* | 3217 | 2382 | 3000 (top step) |
-| vck190: 950 PRO 256GB | 953 **s** | 940 **s** | 1000 **s** (16 buffers: 750) | 946 **s** | **750 s** (one run; sweep pending) | 2264 | 2087 | 2250 |
-| vck190: RAID0 (both) | 1911 **b** | 1855 **b** | 2000 **b** (16 buffers: 1750) | 1446 (one run) | *pending (bench)* | 3652 | 2912 | 3000 (top step) |
+| vck190: 970 EVO 250GB | 1535 **b** | 1519 **b** | 1500 **b** | 492 (average across the cache end) | **250 s** | 3217 | 2382 | 3000 (top step) |
+| vck190: 950 PRO 256GB | 953 **s** | 940 **s** | 1000 **s** (16 buffers: 750) | 946 **s** | **750 s** | 2264 | 2087 | 2250 |
+| vck190: RAID0 (both) | 1911 **b** | 1855 **b** | 2000 **b** (16 buffers: 1750) | 1446 (one run) | **500 s** | 3652 | 2912 | 3000 (top step) |
 
 | target / config | dd write: rate / % of one core / MB/s per % core | fdrec: rate / % of one core / MB/s per % core |
 |---|---|---|
@@ -335,7 +351,11 @@ achieved), the top step below the 3.2 GB/s sink maximum, against 2750 MB/s on `u
 of CPU, a 1.4 GHz Cortex-A72 core does about 1.4–1.6 times the work of a 1.1 GHz Cortex-A53
 core: `fdrec` 54–62 vs 33–41 MB/s per % of a core, `dd` writes 23–25 vs 16–18. With 32 buffers
 the ring hides short deficits over 4000 MiB: the 950 PRO is clean at 1000 MB/s while writing
-951–955 MB/s, and not with 16 buffers.
+951–955 MB/s, and not with 16 buffers. The sustained 32 GB rates are identical on both boards
+(250 / 750 / 500 MB/s): they are set by the SSDs. A single `dd` write stream reaches the
+970 EVO's limit on the VCK190 (1519 MB/s, fio 1535), whereas on `uzev` the CPU limited it to
+1024 MB/s. With both drives, the dual `dd` read script reaches 4279 MB/s aggregate on the
+VCK190. In 10 GB playbacks, RAID0 is clean at the 3.2 GB/s sink maximum.
 
 ### Method
 
