@@ -65,6 +65,14 @@ recorder.
   boots its root filesystem from `/dev/mmcblk1p3`.
 * The SOM has 4 GB of PS DDR4.
 
+### ZCU106
+
+* The `zcu106_hpc0` design uses the HPC0 FMC connector, which supports two SSDs, each with an
+  independent 4-lane PCIe Gen3 interface (XDMA Root Ports).
+* The design builds with the free Vivado Standard Edition (no license needed).
+* The SSD on the first Root Port is set up by the NVMe driver with a single I/O queue, as on
+  the UltraZed-EV (see [Where the bottlenecks are](benchmarks.md#where-the-bottlenecks-are)).
+
 ### VCK190
 
 * The `vck190_fmcp1` design uses the FMCP1 connector (FMC+), which supports two SSDs, each
