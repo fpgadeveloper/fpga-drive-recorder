@@ -78,19 +78,35 @@ the SSD writes were not completing fast enough. In order of likelihood:
 
 1. **The rate is above what the SSDs sustain.** Find the sustained rate with `fdbench.sh`
    (32 GB per step) and record below it. A rate that works for 10 GB may fail for longer
-   recordings.
+   recordings. On a drive with a large cache (75-120 GB on the 1 TB drives in
+   [Benchmarks](benchmarks.md#long-recordings-past-the-slc-cache)), 32 GB stays inside the
+   cache: confirm the rate with one recording longer than the cache. On the Zynq UltraScale+
+   targets one SSD slot writes at most ~2.95-3.04 GB/s (the Gen3 x4 link), even inside the
+   cache: record above 3000 MB/s (with some drives, 3000 MB/s itself) with RAID0. An image built from the first release of these
+   designs caps a slot at ~1.6 GB/s (see [Benchmarks](benchmarks.md#the-former-zynq-ultrascale-per-slot-ceiling-fixed)).
 2. **The SLC cache ran out.** If the drops start after a fixed amount of data (on the
-   970 EVO 250GB, ~14 GB), the SSD's write cache filled up; see
+   970 EVO 250GB, ~14 GB; the Sabrent Rocket 2230 1TB ~72-75 GB; the Samsung 980 PRO 1TB
+   ~115-120 GB), the SSD's write cache filled up; see
    [Benchmarks](benchmarks.md#the-slc-cache). Use a lower rate, a larger or faster SSD, or
    RAID0.
 3. **`fstrim` just before the recording.** If the drops are near the start of the file,
    the SSDs may still be processing discards: wait a few seconds after `fstrim` (or skip
    it) before recording; see [Benchmarks](benchmarks.md#the-fstrim-finding-and-the-ring-size).
 4. **The ring is too small for the SSD's write stalls.** More buffers (`--buffers 48`,
-   `--buffers 64`) or larger buffers absorb longer stalls, within the hugepage pool.
+   `--buffers 64`) or larger buffers absorb longer stalls, within the hugepage pool. A single
+   gap in an otherwise clean long recording, at no fixed offset, is such a stall: the Sabrent
+   Rocket 2230 1TB occasionally stopped completing writes for ~0.65 s, longer than the default
+   256 MB ring lasts above ~400 MB/s, and the largest ring of 8 MB buffers (64 x 8 MB =
+   512 MB) above ~790 MB/s.
 5. **The rate exceeds the FIFO budget.** If `fdrec` warns that "the ingest FIFO covers only
    ... of the DMA restart gap", the rate is too high for the design's FIFO, whatever the
-   SSD; see [Applications](apps.md#tuning-the-fifo-budget-at-buffer-boundaries).
+   SSD; see [Applications](apps.md#tuning-the-fifo-budget-at-buffer-boundaries). Without a
+   warning, a drop of a few hundred to a few thousand beats whose gap starts 64 KiB (plus a few
+   beats) after a buffer boundary is one late DMA restart; this happened rarely in long RAID0
+   recordings with the 1 TB pairs, on `zcu106_hpc0` from 2500 MB/s (Sabrent pair, once also at
+   1750 MB/s over 32 GB) and from 2750 MB/s (980 PRO pair, once also at 3000 MB/s over 10 GB),
+   and on `vck190_fmcp1` from 2250 MB/s (980 PRO pair) upwards (see
+   [Benchmarks](benchmarks.md#long-recordings-past-the-slc-cache)).
 6. **Other I/O on the same SSDs**, a nearly full filesystem, or a filesystem other than XFS
    or ext4.
 
@@ -143,6 +159,18 @@ The sink consumed faster than the SSDs delivered the data.
 * **Read stalls.** Isolated underflow bursts near the read rate are read stalls longer than
   the ring lasts at that rate; more buffers absorb them (see
   [Benchmarks](benchmarks.md#playback)).
+* **One Samsung 980 PRO 1TB on `zcu106_hpc0` at 2500-2750 MB/s.** A single 980 PRO 1TB on
+  `zcu106_hpc0` under-runs by millions of ticks at 2500 and 2750 MB/s in almost every run, while
+  2250 MB/s is clean every time and 3000 MB/s mostly; the idle time and the ring size make no
+  difference, and the cause is not known (see
+  [Benchmarks](benchmarks.md#single-drive-playback-deficit-on-zcu106_hpc0)). Play back at
+  2250 MB/s or less from that drive alone, or use RAID0.
+* **Playing back right after recording** (images of the first release only). With the first
+  release of the Zynq UltraScale+ designs, a Samsung 980 PRO 1TB RAID0 on `zcu106_hpc0`
+  underflowed at 2500-3000 MB/s within about three minutes of a recording. That was the former
+  ~1.6 GB/s per-slot ceiling; with the current design the effect is gone (see
+  [Benchmarks](benchmarks.md#playback-soon-after-a-recording)). If you run such an image, rebuild
+  it from the current design, or wait a few minutes before a fast playback.
 
 ### `fdplay` stalls and gives up (`--no-check`)
 

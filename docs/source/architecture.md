@@ -109,10 +109,14 @@ Zynq UltraScale+ designs:
 
 | Clock | Source | Frequency (actual, `uzev` build) | Used by |
 |---|---|---|---|
-| `dp_clk` | PS `pl_clk1` | 249 997 498 Hz (250 MHz requested) | AXI DMA, SmartConnect, `S_AXI_HP2_FPD`, packetizer, ingest read side, fdrec registers, `periph_intercon_0` M02/M03 |
+| `dp_clk` | PS `pl_clk1` | 249 997 498 Hz (250 MHz requested) | AXI DMA, SmartConnect, `S_AXI_HP2_FPD`, packetizer, ingest read side, fdrec registers, `periph_intercon_0` M02/M03; `S_AXI_HP0/1_FPD` and the slave side of their interconnects (the Root Ports' `M_AXI_B` to PS DDR) |
 | `src_clk` | PS `pl_clk2` | 199 998 001 Hz (200 MHz requested) | `user_data_source` (TPG), `user_data_sink` (checker), ingest write side, egress read side |
-| `pl_clk0` | PS `pl_clk0` | ~100 MHz (base design) | `M_AXI_HPM0/1_FPD`, `S_AXI_HP0/1_FPD` |
+| `pl_clk0` | PS `pl_clk0` | ~100 MHz (base design) | `M_AXI_HPM0/1_FPD` |
 | `axi_aclk` | XDMA | 250 MHz (base design) | PCIe root ports |
+
+On the Zynq UltraScale+ targets `S_AXI_HP0/1_FPD` carry the SSDs' DMA traffic between the XDMA
+Root Ports and the PS DDR; at `pl_clk1` (250 MHz, 128 bits) each carries up to 4.0 GB/s, above
+the payload rate of a Gen3 x4 link (see [Benchmarks](benchmarks.md#where-the-bottlenecks-are)).
 
 The datapath clock is independent of the PCIe clocks, so the recorder does not depend on the
 PCIe link state. The actual frequencies are read from the PS configuration when the block
@@ -120,7 +124,9 @@ design is built and passed to `fdrec_core` as the `SRC_CLK_HZ` / `DP_CLK_HZ` par
 which software reads from the `SRC_CLK_HZ` / `DP_CLK_HZ` registers.
 
 * Peak source rate: 199 998 001 Hz × 16 B = 3.2 GB/s. This is more than any PCIe Gen3 x4
-  SSD can write, and less than the 4 GB/s datapath. So the ingest FIFO can only overflow
+  SSD can write, and less than the 4 GB/s datapath. A Gen4 SSD on the Versal target can write
+  faster (the Sabrent Rocket 2230 1TB recorded 10 GB at 3.2 GB/s on `vck190_fmcp1`), so there
+  the generator, not the SSD, is the limit. So the ingest FIFO can only overflow
   because of DMA backpressure, never because of the clock ratio.
 * Each clock domain has its own `proc_sys_reset` (`rst_dp_clk`, `rst_src_clk`), released
   by `pl_resetn0`.

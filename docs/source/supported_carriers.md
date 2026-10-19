@@ -57,7 +57,10 @@ recorder.
 ### UltraZed-EV Carrier
 
 * The carrier has one HPC FMC connector, which supports two SSDs, each with an independent
-  4-lane PCIe Gen3 interface.
+  4-lane PCIe Gen3 interface. A Gen4 SSD links at Gen3 x4. The design has the same HP-port
+  clocking as the ZCU106 design (250 MHz; the first release capped each slot at ~1.6 GB/s, see
+  [Benchmarks](benchmarks.md#the-former-zynq-ultrascale-per-slot-ceiling-fixed)); the `uzev` figures on the Benchmarks page were measured before that
+  change and were not repeated.
 * Boot mode: to boot from the SD card, set DIP switch SW2 on the UltraZed-EV SOM to 1000
   (1=ON, 2=OFF, 3=OFF, 4=OFF).
 * The Linux console is the PS UART 0 interface on the carrier's USB-UART, at 115200 baud.
@@ -68,13 +71,21 @@ recorder.
 ### ZCU106
 
 * The `zcu106_hpc0` design uses the HPC0 FMC connector, which supports two SSDs, each with an
-  independent 4-lane PCIe Gen3 interface (XDMA Root Ports).
+  independent 4-lane PCIe Gen3 interface (XDMA Root Ports). A Gen4 SSD links at Gen3 x4 (the
+  Samsung 980 PRO 1TB and the Sabrent Rocket 2230 1TB: `8GT/s (downgraded)`). Inside an SSD's
+  cache a slot runs at up to the Gen3 x4 link's rate (~2.95-3.04 GB/s write, ~2.9-3.2 GB/s read,
+  measured with both drives); two SSDs in RAID0 record at the generator's
+  3.2 GB/s. The first release of the design capped each slot at ~1.6 GB/s, because the HP ports
+  between the Root Ports and the PS DDR were clocked at 99.99 MHz (see
+  [Benchmarks](benchmarks.md#the-former-zynq-ultrascale-per-slot-ceiling-fixed)).
 * The design builds with the free Vivado Standard Edition (no license needed).
 
 ### VCK190
 
 * The `vck190_fmcp1` design uses the FMCP1 connector (FMC+), which supports two SSDs, each
-  with an independent 4-lane PCIe Gen4 interface.
+  with an independent 4-lane PCIe Gen4 interface. Gen4 SSDs link at Gen4 x4 (measured at
+  16 GT/s with the Sabrent Rocket 2230 1TB on the M.2 M-key Stack FMC and the Samsung 980 PRO
+  1TB on the FPGA Drive FMC Gen4), Gen3 SSDs at Gen3 x4.
 * VADJ: the board's system controller normally sets the FMC VADJ supply from the FMC card's
   EEPROM. The Linux image does not depend on it: its U-Boot boot script enables VADJ at
   1.5 V (IR38164 regulator over I2C) before Linux starts, and prints

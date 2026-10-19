@@ -274,6 +274,13 @@ fabric must bridge it at the stream rate:
 | egress (playback) | 4096 beats = 64 KB | 4.4 GB/s |
 | (a 512-beat FIFO, for comparison) | 8 KB | ~550 MB/s |
 
+The 15 µs is typical, not a hard bound: long RAID0 recordings with the 1 TB pairs occasionally
+lost beats to a restart that took longer than the FIFO covers (20-33 µs at 2-3.2 GB/s), on
+`zcu106_hpc0` (Cortex-A53 at 1.2 GHz) from 2500 MB/s (Sabrent pair, once also at 1750 MB/s over
+32 GB) and from 2750 MB/s (980 PRO pair, once also at 3000 MB/s over 10 GB), and on
+`vck190_fmcp1` (Cortex-A72) from 2250 MB/s (980 PRO pair) upwards (see
+[Benchmarks](benchmarks.md#long-recordings-past-the-slc-cache)).
+
 Below that bound, underflows (playback) or drops (recording) mean the SSD or filesystem is too
 slow; above it they also appear at buffer boundaries however fast the SSD is. `fdplay` and
 `fdrec` print a warning when the programmed rate exceeds the budget of the design's FIFO
@@ -342,6 +349,9 @@ fdbench: sustained recording rate: 1500 MB/s (/dev/md0, xfs, 32G per step)
 The highest passing rate is the **sustained recording rate** of that board + SSD(s) +
 filesystem. The default 32 GB per step is large enough to exhaust the SLC write cache of
 typical smaller SSDs, so the result is the sustained rate rather than the cache rate; use a
-larger `--size` for drives with very large caches. Run it once on a single drive
+larger `--size` for drives with very large caches (the 1 TB drives on the
+[Benchmarks](benchmarks.md#long-recordings-past-the-slc-cache) page cache 75-120 GB each, so
+32 GB stays inside the cache), or confirm the result with one `fdrec` recording longer than
+the cache. Run it once on a single drive
 (`fdsetup-raid0.sh --single`) and once on RAID0; the [Benchmarks](benchmarks) page has
 the results measured so far.

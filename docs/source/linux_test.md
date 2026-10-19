@@ -32,7 +32,8 @@ nvme nvme1: 4/0/0 default/read/poll queues
 ```
 
 Check the negotiated link speed and width with `lspci`; the Root Port's `LnkSta` should
-match the design (Gen3 x4, 8 GT/s, on the Zynq UltraScale+ targets):
+match the design (Gen3 x4, 8 GT/s, on the Zynq UltraScale+ targets; on `vck190_fmcp1`, Gen4 x4,
+16 GT/s, with a Gen4 SSD and Gen3 x4 with a Gen3 SSD):
 
 ```
 lspci -vv | grep -E "^[0-9a-f]|LnkCap:|LnkSta:"
