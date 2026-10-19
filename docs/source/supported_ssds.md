@@ -26,25 +26,24 @@ it was measured on the M.2 M-key Stack FMC. The Samsung 980 PRO 1TB was measured
 Drive FMC Gen4. Each pair was measured on both `vck190_fmcp1` and `zcu106_hpc0`.
 
 **PCIe generation.** Both 1 TB drives are Gen4 drives. On the VCK190's Gen4-capable QDMA Root
-Ports they link at **Gen4 x4** (16 GT/s, `LnkSta` of both the Root Port and the SSD); the
-Sabrent Rocket 2230 1TB was the first Gen4 link in this design, the Samsung 980 PRO 1TB the
-second. On the Zynq UltraScale+ Root Ports both link at Gen3 x4 (`lspci`:
+Ports they link at **Gen4 x4** (16 GT/s, `LnkSta` of both the Root Port and the SSD). On the
+Zynq UltraScale+ Root Ports both link at Gen3 x4 (`lspci`:
 `Speed 8GT/s (downgraded), Width x4`), as expected. The 970 EVO and 950 PRO are Gen3 drives and
 link at Gen3 x4 on every target. On the Zynq UltraScale+ targets a fast Gen4 drive runs at the
 Gen3 x4 link's rate inside its cache: ~2.95-3.04 GB/s writing and ~2.9-3.2 GB/s reading per
-slot, measured with both 1 TB drives on `zcu106_hpc0`. (The first release of these designs
-capped each slot at ~1.6 GB/s; see [Benchmarks](benchmarks.md#the-former-zynq-ultrascale-per-slot-ceiling-fixed).)
+slot, measured with both 1 TB drives on `zcu106_hpc0`.
 
 **NVMe I/O queues.** On every board tested, the Linux NVMe driver set the 970 EVO 250GB up with
 a single I/O queue (`nvme nvme0: 1/0/0 default/read/poll queues` in `dmesg`), whereas the other
 drives got one queue per CPU core: the 950 PRO two to four, and both 1 TB drives four on the
-four-core ZCU106 (`4/0/0`, both slots) and two on the two-core VCK190 (`2/0/0`). The cause of the 970 EVO's single queue was not investigated; it is
-behaviour of this drive's firmware or controller, not of the design. With one queue, all of
+four-core ZCU106 (`4/0/0`, both slots) and two on the two-core VCK190 (`2/0/0`). The cause of
+the 970 EVO's single queue was not investigated; it is behaviour of this drive's firmware or
+controller, not of the design. With one queue, all of
 the drive's completions are handled on one CPU core (see
 [Where the bottlenecks are](benchmarks.md#3-the-nvme-queue-count)).
 
-The measured rates of all drives, alone and as RAID0 pairs, are on the
-[Benchmarks](benchmarks) page.
+The measured rates of the two 1 TB drives, alone and as RAID0 pairs, on `vck190_fmcp1` and
+`zcu106_hpc0`, are on the [Benchmarks](benchmarks) page.
 
 ## Choosing SSDs for recording
 

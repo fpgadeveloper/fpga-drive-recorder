@@ -161,8 +161,9 @@ What a stall looks like in the kernel log, and why it is harmless, is described 
 [Troubleshooting](troubleshooting.md#recording-stops-with-recording-stalled-exit-code-1).
 
 **Ring size (`--buffers`).** The ring absorbs the time an SSD takes to complete a write. The
-default of 32 × 8 MB (256 MB) covers a write stall of about 128 ms at 2 GB/s; 16 buffers
-proved too few at 1.7 GB/s right after an `fstrim` (see
+default of 32 × 8 MB (256 MB) covers a write stall of about 128 ms at 2 GB/s. 16 × 8 MB
+(128 MB, 75 ms at 1.7 GB/s) proved too few at 1.7 GB/s right after an `fstrim`, when the
+first writes took more than 100 ms to complete (see
 [Benchmarks](benchmarks.md#the-fstrim-finding-and-the-ring-size)).
 
 Notes:
@@ -262,9 +263,9 @@ Notes:
 At every buffer boundary the AXI DMA pauses briefly: `xilinx_dma` lets the channel go idle at
 the end of the current buffer and its interrupt handler starts the next one (see
 [Kernel driver](driver.md), "Interaction with the `xilinx_dma` driver").
-The gap is about **15 µs** worst case on the Zynq UltraScale+ target measured (`uzev`) (interrupt latency plus DMA restart; derived from
-the ingest FIFO high-water marks of the Phase-1 benchmarks). The FIFO between the DMA and the
-fabric must bridge it at the stream rate:
+The gap is about **15 µs** worst case (interrupt latency plus DMA restart), measured on a Zynq
+UltraScale+ target and derived from the ingest FIFO high-water marks of its recordings. The
+FIFO between the DMA and the fabric must bridge it at the stream rate:
 
     FIFO bytes / rate  >  ~15 µs
 
@@ -350,7 +351,7 @@ The highest passing rate is the **sustained recording rate** of that board + SSD
 filesystem. The default 32 GB per step is large enough to exhaust the SLC write cache of
 typical smaller SSDs, so the result is the sustained rate rather than the cache rate; use a
 larger `--size` for drives with very large caches (the 1 TB drives on the
-[Benchmarks](benchmarks.md#long-recordings-past-the-slc-cache) page cache 75-120 GB each, so
+[Benchmarks](benchmarks.md#long-recordings-past-the-slc-cache) page cache 72-120 GB each, so
 32 GB stays inside the cache), or confirm the result with one `fdrec` recording longer than
 the cache. Run it once on a single drive
 (`fdsetup-raid0.sh --single`) and once on RAID0; the [Benchmarks](benchmarks) page has

@@ -9,9 +9,11 @@ and read goes through the Linux block layer, the NVMe driver and the filesystem,
 recorder needs a running Linux system, and its rate is bounded by the SSDs and by the Linux
 I/O path (see [Where the bottlenecks are](benchmarks.md#where-the-bottlenecks-are)). On the
 Zynq UltraScale+ targets the PCIe Root Ports are Gen3 x4, so a fast Gen4 SSD writes at most
-~2.95-3.04 GB/s per slot (one drive records up to 2750-3000 MB/s); RAID0 of two SSDs records at the generator's 3.2 GB/s. (The first release
-of these designs capped one SSD at ~1.6 GB/s, because the HP ports between the Root Ports and
-the PS DDR were clocked at 99.99 MHz; see [Benchmarks](benchmarks.md#the-former-zynq-ultrascale-per-slot-ceiling-fixed).)
+~2.95-3.04 GB/s per slot, the rate of the Gen3 x4 link (one drive records up to
+2750-3000 MB/s); RAID0 of two SSDs records at the generator's 3.2 GB/s inside the SLC cache.
+On the Versal target
+`vck190_fmcp1` the Root Ports are Gen4 x4, and one drive records at the generator's 3.2 GB/s
+inside its SLC cache.
 
 For CPU-less operation or rates beyond what Linux can sustain, hardware NVMe host IP is
 available from Missing Link Electronics. See Missing Link Electronics'
@@ -36,10 +38,12 @@ available from Missing Link Electronics. See Missing Link Electronics'
 * **FIFO depth vs. the DMA restart gap.** At every buffer boundary the AXI DMA pauses for the
   interrupt latency (about 15 µs measured), which the 64 KB FIFOs cover up to about
   4.4 GB/s. The latency is occasionally longer: in long RAID0 recordings with the 1 TB pairs,
-  single late restarts lost a few hundred to a few tens of thousands of beats (the FIFO covers
-  20-33 µs at 2-3.2 GB/s), so long RAID0 recordings were clean up to 2500 MB/s (980 PRO pair)
-  and 2250 MB/s (Sabrent pair) on `zcu106_hpc0` and up to 2000 MB/s (980 PRO pair) on
-  `vck190_fmcp1` (see [Benchmarks](benchmarks.md#long-recordings-past-the-slc-cache)). A design with a much higher stream rate needs deeper FIFOs (`FIFO_DEPTH`,
+  single late restarts at 8 MiB buffer boundaries lost a few hundred to a few tens of
+  thousands of beats (the FIFO covers 20-33 µs at 2-3.2 GB/s), so long RAID0 recordings were
+  clean up to 2500 MB/s (980 PRO pair) and 2250 MB/s (Sabrent pair) on `zcu106_hpc0` and up to
+  2000 MB/s (980 PRO pair) on `vck190_fmcp1` (see
+  [Benchmarks](benchmarks.md#long-recordings-past-the-slc-cache)). A design with a much higher
+  stream rate needs deeper FIFOs (`FIFO_DEPTH`,
   `EGR_FIFO_DEPTH`; the FIFOs use block RAM, as `xpm_fifo_async` cannot use UltraRAM).
 
 ## Software

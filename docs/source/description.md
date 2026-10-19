@@ -66,10 +66,12 @@ available from Missing Link Electronics: see their
 
 What the recorder sustains depends on the SSDs far more than on the FPGA: consumer SSDs write
 fast only until their SLC cache is full, and the recorder's rate is the drive's worst moment
-over the whole recording. Measured sustained rates, past the SLC cache, range from 250 MB/s
-(one Samsung 970 EVO 250GB) to 2750 MB/s (two Sabrent Rocket 2230 1TB in RAID0 on
-`vck190_fmcp1`); the Benchmarks page marks the Zynq UltraScale+ figures that were measured
-before the current design's HP-port clock change.
+over the whole recording. With the 1 TB SSDs measured, one drive sustains 1750 MB/s past its
+SLC cache (just below its post-cache write rate of ~1.77-1.8 GB/s; 1000 MB/s for one Sabrent
+Rocket 2230 1TB on `vck190_fmcp1`, limited by its rare write stalls) and two drives in RAID0 2000-2750 MB/s.
+Inside the cache, one drive records up to 2750-3000 MB/s on the Gen3 x4 slots of
+`zcu106_hpc0` and 3200 MB/s on the Gen4 x4 slots of `vck190_fmcp1`, and a RAID0 pair records up
+to the generator's 3200 MB/s maximum.
 Measured rates per target and SSD are on the
 [Benchmarks](benchmarks) page, and
 [Where the bottlenecks are](benchmarks.md#where-the-bottlenecks-are) explains why you do not

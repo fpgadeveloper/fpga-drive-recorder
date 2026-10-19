@@ -78,12 +78,12 @@ the SSD writes were not completing fast enough. In order of likelihood:
 
 1. **The rate is above what the SSDs sustain.** Find the sustained rate with `fdbench.sh`
    (32 GB per step) and record below it. A rate that works for 10 GB may fail for longer
-   recordings. On a drive with a large cache (75-120 GB on the 1 TB drives in
+   recordings. On a drive with a large cache (72-120 GB on the 1 TB drives in
    [Benchmarks](benchmarks.md#long-recordings-past-the-slc-cache)), 32 GB stays inside the
    cache: confirm the rate with one recording longer than the cache. On the Zynq UltraScale+
    targets one SSD slot writes at most ~2.95-3.04 GB/s (the Gen3 x4 link), even inside the
-   cache: record above 3000 MB/s (with some drives, 3000 MB/s itself) with RAID0. An image built from the first release of these
-   designs caps a slot at ~1.6 GB/s (see [Benchmarks](benchmarks.md#the-former-zynq-ultrascale-per-slot-ceiling-fixed)).
+   cache: record above 3000 MB/s (with some drives, 3000 MB/s itself) with RAID0 (see
+   [Where the bottlenecks are](benchmarks.md#where-the-bottlenecks-are)).
 2. **The SLC cache ran out.** If the drops start after a fixed amount of data (on the
    970 EVO 250GB, ~14 GB; the Sabrent Rocket 2230 1TB ~72-75 GB; the Samsung 980 PRO 1TB
    ~115-120 GB), the SSD's write cache filled up; see
@@ -165,12 +165,6 @@ The sink consumed faster than the SSDs delivered the data.
   difference, and the cause is not known (see
   [Benchmarks](benchmarks.md#single-drive-playback-deficit-on-zcu106_hpc0)). Play back at
   2250 MB/s or less from that drive alone, or use RAID0.
-* **Playing back right after recording** (images of the first release only). With the first
-  release of the Zynq UltraScale+ designs, a Samsung 980 PRO 1TB RAID0 on `zcu106_hpc0`
-  underflowed at 2500-3000 MB/s within about three minutes of a recording. That was the former
-  ~1.6 GB/s per-slot ceiling; with the current design the effect is gone (see
-  [Benchmarks](benchmarks.md#playback-soon-after-a-recording)). If you run such an image, rebuild
-  it from the current design, or wait a few minutes before a fast playback.
 
 ### `fdplay` stalls and gives up (`--no-check`)
 

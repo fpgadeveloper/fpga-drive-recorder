@@ -226,7 +226,9 @@ underflows. Always give `fdplay` a `--rate` below the read rate of your SSDs.
 ## 6. See a failure on purpose
 
 To see what an overload looks like, record faster than the SSDs can write, for example
-3 GB/s:
+3 GB/s. (A fast Gen4 SSD can record 10 GB at 3 GB/s cleanly inside its SLC cache, as the 1 TB
+drives on the [Benchmarks](benchmarks) page do on `vck190_fmcp1`; with such drives, record
+more than the cache to see drops.)
 
 ```
 sudo fdrec --rate 3000MB --size 10G /mnt/rec/over.dat; echo "exit code $?"
