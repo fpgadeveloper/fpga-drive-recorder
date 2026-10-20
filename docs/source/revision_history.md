@@ -24,10 +24,10 @@ Yocto / EDF 2025.2 flow (no PetaLinux flow, no standalone application). First ta
 * Third target: `zcu106_hpc0` (ZCU106, HPC0, Zynq UltraScale+, PCIe Gen3 x4 per slot).
 * vck190_fmcp1: PCIe PIPE pipeline 2 stages (timing closure).
 * zcu106_hpc0, uzev: HP-port clock fix (2026-10-18). In the first release, the XDMA Root Ports
-  reached the PS DDR through `S_AXI_HP0_FPD` and `S_AXI_HP1_FPD`, which, with the slave side of
+  reached the PS DDR through `S_AXI_HP0_FPD` and `S_AXI_HP1_FPD`, which, with the HP-port side of
   their interconnects, were clocked from `pl_clk0` at 99.99 MHz. A 128-bit port at that clock
   carries at most 1.6 GB/s, so one SSD slot was capped at ~1.57-1.60 GB/s, writing and reading,
-  whatever the drive. HP0/HP1 and the slave side of their interconnects now run on `pl_clk1`
+  whatever the drive. HP0/HP1 and the HP-port side of their interconnects now run on `pl_clk1`
   (250 MHz), which gives 4.0 GB/s per port, on both `zcu106_hpc0` and `uzev`. Timing is met
   (WNS +0.226 ns on `zcu106_hpc0`, +0.133 ns on `uzev`), at a cost of ~70-110 LUTs and no
   additional block RAM. Measured on `zcu106_hpc0` (2026-10-19), a Gen3 x4 slot now writes
