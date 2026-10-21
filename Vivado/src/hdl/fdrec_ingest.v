@@ -18,7 +18,7 @@
 `timescale 1ns / 1ps
 
 module fdrec_ingest #(
-  parameter integer FIFO_DEPTH = 4096,   // beats; power of 2, 16..131072
+  parameter integer FIFO_DEPTH = 16384,  // beats; power of 2, 16..131072
   parameter integer CDC_STAGES = 3
 ) (
   // Source side (src_clk)

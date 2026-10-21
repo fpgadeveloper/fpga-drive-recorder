@@ -163,16 +163,20 @@ Then boot:
 4. Optionally connect the board's Ethernet port to your network.
 5. Power up the board.
 
-During boot, look for the PCIe links and the recorder driver (here on the `uzev` target):
+During boot, look for the PCIe links and the recorder driver (here on the `zcu106_hpc0` target):
 
 ```none
 xilinx-xdma-pcie 400000000.axi-pcie: PCIe Link is UP
 xilinx-xdma-pcie 500000000.axi-pcie: PCIe Link is UP
-fdrec 420010000.fdrec_core: /dev/fdrec0: fdrec_core v1.1, src_clk 199998001 Hz, dp_clk 249997498 Hz, FIFO 4096 beats, DMA rx dma0chan1 tx dma0chan0 (max segment 67108863 bytes), checker
+fdrec 420010000.fdrec_core: dma-channel: IRQ 74 -> CPU3
+fdrec 420010000.fdrec_core: dma-channel: IRQ 75 -> CPU3
+fdrec 420010000.fdrec_core: /dev/fdrec0: fdrec_core v1.1, src_clk 199998001 Hz, dp_clk 249997498 Hz, FIFO 16384 beats, DMA rx dma0chan1 tx dma0chan0 (max segment 67108863 bytes), checker
 ```
 
-(the clock frequencies are the actual PS PL-clock outputs, read from the design; `tx` is the
-playback channel, `checker` means the register map has the playback checker).
+(the `dma-channel` lines report the CPU each AXI DMA channel interrupt was pinned to, see the
+`dma_irq_cpu` parameter in [Kernel driver](driver.md); the clock frequencies are the actual PS
+PL-clock outputs, read from the design; `tx` is the playback channel, `checker` means the
+register map has the playback checker).
 
 ## Log in
 

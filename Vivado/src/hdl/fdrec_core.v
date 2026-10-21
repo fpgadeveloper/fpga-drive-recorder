@@ -52,7 +52,7 @@
 module fdrec_core #(
   parameter integer SRC_CLK_HZ = 200000000,
   parameter integer DP_CLK_HZ  = 250000000,
-  parameter integer FIFO_DEPTH = 4096,
+  parameter integer FIFO_DEPTH = 16384,
   parameter integer EGR_FIFO_DEPTH = 4096
 ) (
   // Source clock domain

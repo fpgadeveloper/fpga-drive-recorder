@@ -81,10 +81,11 @@ or beats are dropped. The rate printed on an SSD's datasheet is usually not that
   cache ended), and one Sabrent Rocket 2230 1TB on `zcu106_hpc0` over 200 GiB (2000 MB/s dropped
   just past its ~72 GB cache). On `vck190_fmcp1` another limit came first for the Sabrent: one
   drive recorded 1000 MB/s over 143 GiB (its limit is a rare ~0.65 s write stall, not
-  bandwidth). RAID0 pairs held 2750 MB/s over 240 GiB (Sabrent) and 2000 MB/s over 480 GiB
-  (980 PRO) on `vck190_fmcp1`, and 2500 MB/s over 350 GiB (980 PRO) and 2250 MB/s over 350 GiB
-  (Sabrent) on `zcu106_hpc0`; faster long RAID0 recordings lost a few beats to late DMA
-  restarts (host interrupt latency), not to the drives.
+  bandwidth). RAID0 pairs held 3200 MB/s, the generator maximum, over 350 GiB (Sabrent) and
+  480 GiB (980 PRO) on `vck190_fmcp1`, and on `zcu106_hpc0` 2750 MB/s over 350 GiB (980 PRO)
+  and 3000 and 3200 MB/s over 350 GiB (Sabrent), one run each; single runs at other rates on
+  `zcu106_hpc0` lost one chunk of 8000-55 000 beats to a late DMA restart (host interrupt
+  latency), not to the drives.
   See [Benchmarks](benchmarks.md#long-recordings-past-the-slc-cache).
 * **Free space and trim.** An SSD with little free space, or one that has not been trimmed,
   has less room for its cache and for garbage collection. Keep the recording filesystem

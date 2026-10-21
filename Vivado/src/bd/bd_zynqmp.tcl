@@ -512,7 +512,7 @@ foreach p $chk_counters {
 create_bd_cell -type module -reference fdrec_core fdrec_core/fdrec_core_0
 set_property -dict [list CONFIG.SRC_CLK_HZ $src_clk_hz \
   CONFIG.DP_CLK_HZ $dp_clk_hz \
-  CONFIG.FIFO_DEPTH {4096} \
+  CONFIG.FIFO_DEPTH {16384} \
   CONFIG.EGR_FIFO_DEPTH {4096}] [get_bd_cells fdrec_core/fdrec_core_0]
 foreach p [concat {src_clk src_resetn dp_clk dp_resetn tpg_enable tpg_seq_rst tpg_rate_inc tpg_seq_next \
                    chk_enable chk_reset chk_rate_inc} $chk_counters] {

@@ -152,8 +152,8 @@ written by the NVMe controller (the app's `O_DIRECT` read: the NVMe driver maps 
 | Capabilities | `fdrec_info.caps`: `FDREC_CAP_TPG`, `FDREC_CAP_S2MM`; `FDREC_CAP_MM2S` when the `"tx"` channel exists; `FDREC_CAP_CHECK` when `VERSION` ≥ 1.1 (checker and egress registers) |
 | Buffers | 2 to 64 per open file; size a multiple of 2 MB, at most 62 MB (`PKT_LEN` ≤ 2^22 - 1 beats); each buffer 2 MB aligned |
 | DMA descriptors | all registered buffers together may need at most 511 AXI DMA buffer descriptors (one per physically contiguous run of up to 64 MB - 1; the default 32 × 8 MB of hugepages needs at most 128) |
-| Module parameter | `stop_drain_ms` (default 5000, writable at `/sys/module/fdrec/parameters/stop_drain_ms`): the longest time `STOP` / `PLAY_STOP` waits for the buffers the DMA still owns to complete before it terminates the channel anyway (see below) |
-| Kernel log at probe | `fdrec <addr>.fdrec_core: /dev/fdrec0: fdrec_core v1.1, src_clk … Hz, dp_clk … Hz, FIFO 4096 beats, DMA rx dma0chan1 tx dma0chan0 (max segment 67108863 bytes), checker`; without a `"tx"` channel: `no DMA channel "tx" (…): record only` |
+| Module parameters | `stop_drain_ms` (default 5000, writable at `/sys/module/fdrec/parameters/stop_drain_ms`): the longest time `STOP` / `PLAY_STOP` waits for the buffers the DMA still owns to complete before it terminates the channel anyway (see below). `dma_irq_cpu` (default -1): the CPU the AXI DMA channel interrupts are pinned to at probe: -1 = the last online CPU, -2 = leave the affinity alone, ≥ 0 = that CPU (see the restart gap, below) |
+| Kernel log at probe | `fdrec <addr>.fdrec_core: /dev/fdrec0: fdrec_core v1.1, src_clk … Hz, dp_clk … Hz, FIFO 16384 beats, DMA rx dma0chan1 tx dma0chan0 (max segment 67108863 bytes), checker`, preceded by one `dma-channel: IRQ <n> -> CPU<c>` line per AXI DMA channel (`dma_irq_cpu`); without a `"tx"` channel: `no DMA channel "tx" (…): record only` |
 | Addressing | the buffers must be directly addressable by the AXI DMA (no swiotlb bouncing): the driver refuses a buffer whose DMA address differs from its physical address. The design's AXI DMA uses 64-bit addressing, so all of PS DDR is reachable |
 
 ## ioctl reference
@@ -305,9 +305,31 @@ driver shape how it does that:
   terminates an idle channel. (The halt-mid-packet behaviour was observed on S2MM on the
   bench; for MM2S the flush makes the driver independent of it.)
 * **Restart gap.** Because the pending descriptor is started from the interrupt handler, the
-  DMA pauses at every buffer boundary for the interrupt latency plus the restart (~15 µs
-  worst case, measured on a Zynq UltraScale+ target). The ingest FIFO (recording) and the
-  egress FIFO (playback) must cover it at the stream rate; see [the FIFO budget](apps.md#tuning-the-fifo-budget-at-buffer-boundaries).
+  DMA pauses at every buffer boundary for the interrupt latency plus the restart. Measured on
+  `zcu106_hpc0` (ftrace of the S2MM interrupt over 32 GB RAID0 recordings at 3200 MB/s): the
+  handler itself takes 8 µs (median; 14 µs max: AXI-Lite register accesses and uncached
+  descriptor-status reads, not the number of descriptors), and the stall seen by the ingest
+  FIFO is ~9 µs at every boundary (median high-water mark ~1800 beats), with a tail of
+  15-20 µs when the interrupt is delivered late. Rarely it is much longer: over 350 GiB RAID0
+  recordings at 3000-3200 MB/s one boundary took 120-240 µs (`zcu106_hpc0`) and 34-59 µs
+  (`vck190_fmcp1`), untraced. The ingest FIFO (recording) and the egress
+  FIFO (playback) must cover it at the stream rate; see
+  [the FIFO budget](apps.md#tuning-the-fifo-budget-at-buffer-boundaries). A chain of
+  descriptors that keeps the channel armed across buffer boundaries, with no software in that
+  path, would remove the gap; it is a planned follow-up.
+* **Interrupt CPU (`dma_irq_cpu`).** On Zynq UltraScale+ every NVMe completion interrupt of a
+  PL PCIe root port (the XDMA bridge's MSI controller is a chained interrupt handler) is
+  handled on CPU0, whatever affinity the NVMe queues show, in hard-IRQ bursts of up to
+  ~0.8 ms: one 8 MiB read completes as 16 × 512 KB commands, each invalidating its pages,
+  because the PCIe path is not cache coherent. An AXI DMA interrupt on CPU0 waits behind
+  them. In playback the SSD read issued after each DMA completion takes about one buffer
+  period at 2500 MB/s, so its completion burst lands just before the next buffer boundary
+  and delays the MM2S restart by ~0.2 ms, far more than the egress FIFO bridges (one
+  980 PRO on `zcu106_hpc0`: 0 of 5 runs clean at 2500 MB/s with the MM2S interrupt on CPU0,
+  5 of 5 on CPU3). The driver therefore pins both AXI DMA channel interrupts at probe to the
+  last online CPU (module parameter `dma_irq_cpu`; `/proc/interrupts` shows them counting
+  there). Keeping the NVMe handling on CPU0 is deliberate: the NVMe completions cannot be
+  moved off the chained handler's CPU, and the recorder's own threads are not pinned.
 
 ## Verified against the kernel sources
 

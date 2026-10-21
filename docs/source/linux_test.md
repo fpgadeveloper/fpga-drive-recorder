@@ -50,7 +50,7 @@ If a link does not come up or an SSD is missing, see [Troubleshooting](troublesh
 
 ## 2. Check the recorder driver
 
-The `fdrec` driver is loaded at boot. It prints one line when it binds to the hardware:
+The `fdrec` driver is loaded at boot. It prints a few lines when it binds to the hardware:
 
 ```
 dmesg | grep fdrec
@@ -59,10 +59,13 @@ dmesg | grep fdrec
 Example output (representative):
 
 ```none
-fdrec 420010000.fdrec_core: /dev/fdrec0: fdrec_core v1.1, src_clk 199998001 Hz, dp_clk 249997498 Hz, FIFO 4096 beats, DMA rx dma0chan1 tx dma0chan0 (max segment 67108863 bytes), checker
+fdrec 420010000.fdrec_core: dma-channel: IRQ 74 -> CPU3
+fdrec 420010000.fdrec_core: dma-channel: IRQ 75 -> CPU3
+fdrec 420010000.fdrec_core: /dev/fdrec0: fdrec_core v1.1, src_clk 199998001 Hz, dp_clk 249997498 Hz, FIFO 16384 beats, DMA rx dma0chan1 tx dma0chan0 (max segment 67108863 bytes), checker
 ```
 
-The line gives the register map version (1.1: record and playback), the actual source and
+The `dma-channel` lines give the CPU each AXI DMA channel interrupt was pinned to (the
+`dma_irq_cpu` module parameter, see [Kernel driver](driver.md)). The last line gives the register map version (1.1: record and playback), the actual source and
 datapath clock frequencies, the ingest FIFO depth, the two DMA channels (`rx` = record,
 `tx` = playback) and `checker` when the playback checker is present. Then check the device,
 its sysfs attributes and the hugepage pool that the buffers come from:
@@ -161,10 +164,10 @@ Example output (representative):
 
 ```none
 fdrec: recording to /mnt/rec/test.dat (32 x 8 MB buffers, qd 8, fixed buffers, test pattern) -- Ctrl-C to stop
-     10.0s   1000.1 MB/s (avg   999.9)       10.000 GB  inflight  2  fifo_hwm   842/4096  drops 0
+     10.0s   1000.1 MB/s (avg   999.9)       10.000 GB  inflight  2  fifo_hwm   842/16384  drops 0
 fdrec: /mnt/rec/test.dat: 10737418240 bytes (1280 buffers) in 10.74 s, 1000.0 MB/s
-fdrec: dropped beats 0 (at stop: 0), FIFO high-water 842 of 4096 beats, max writes in flight 8
-RESULT bytes=10737418240 seconds=10.737 rate_bps=1000000000 drops=0 fifo_hwm=842 fifo_depth=4096 error=0
+fdrec: dropped beats 0 (at stop: 0), FIFO high-water 842 of 16384 beats, max writes in flight 8
+RESULT bytes=10737418240 seconds=10.737 rate_bps=1000000000 drops=0 fifo_hwm=842 fifo_depth=16384 error=0
 exit code 0
 ```
 

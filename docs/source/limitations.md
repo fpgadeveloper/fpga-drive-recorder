@@ -35,15 +35,20 @@ available from Missing Link Electronics. See Missing Link Electronics'
 * **The playback sink shares the source clock.** `user_data_sink` runs on `src_clk`; a sink
   with its own clock needs its own clock-domain crossing inside the hierarchy (see
   [custom data sink](custom_sink)).
-* **FIFO depth vs. the DMA restart gap.** At every buffer boundary the AXI DMA pauses for the
-  interrupt latency (about 15 µs measured), which the 64 KB FIFOs cover up to about
-  4.4 GB/s. The latency is occasionally longer: in long RAID0 recordings with the 1 TB pairs,
-  single late restarts at 8 MiB buffer boundaries lost a few hundred to a few tens of
-  thousands of beats (the FIFO covers 20-33 µs at 2-3.2 GB/s), so long RAID0 recordings were
-  clean up to 2500 MB/s (980 PRO pair) and 2250 MB/s (Sabrent pair) on `zcu106_hpc0` and up to
-  2000 MB/s (980 PRO pair) on `vck190_fmcp1` (see
-  [Benchmarks](benchmarks.md#long-recordings-past-the-slc-cache)). A design with a much higher
-  stream rate needs deeper FIFOs (`FIFO_DEPTH`,
+* **FIFO depth vs. the DMA restart gap.** At every buffer boundary the AXI DMA pauses while
+  the driver's interrupt handler starts the next buffer: about 9 µs at every boundary with a
+  15-20 µs tail on `zcu106_hpc0` (with the DMA interrupts on their own CPU, the driver's
+  default). The 256 KB ingest FIFO covers 82 µs at the 3.2 GB/s source maximum and the 64 KB
+  egress FIFO 20 µs. Rarely the restart takes much longer: in RAID0 recordings on
+  `zcu106_hpc0` one boundary in a run took 120-415 µs at 2500-3200 MB/s and lost
+  8085-54 968 beats (five such events in eleven 350 GiB runs and one in a 32 GB run, with
+  either pair of drives); on `vck190_fmcp1` the longest boundary seen was 59 µs and
+  2250-3200 MB/s were clean over 350 and 480 GiB (see
+  [Benchmarks](benchmarks.md#5-latency-budgets-not-bandwidth)).
+  So a long RAID0 recording at 2500 MB/s or more on a Zynq UltraScale+ target may still drop a
+  few tens of thousands of beats once in a few hundred GB. Removing the software from the boundary path
+  (a descriptor chain that keeps the DMA armed across buffers, with overrun detection) is the
+  planned follow-up. A design with a higher stream rate needs deeper FIFOs (`FIFO_DEPTH`,
   `EGR_FIFO_DEPTH`; the FIFOs use block RAM, as `xpm_fifo_async` cannot use UltraRAM).
 
 ## Software

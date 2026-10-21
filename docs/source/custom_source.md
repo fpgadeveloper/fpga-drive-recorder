@@ -67,8 +67,8 @@ sustain, otherwise beats are dropped:
 * The SSD (or the RAID0 array) sustained write rate, which is usually much lower. Use
   `fdbench.sh` to measure it for your board and SSD.
 
-The ingest FIFO (64 KB) only absorbs short bursts, for example a 4 GB/s source can run for
-about 16 µs into an empty FIFO with nothing draining it. If your source is bursty, its
+The ingest FIFO (256 KB) only absorbs short bursts, for example a 4 GB/s source can run for
+about 65 µs into an empty FIFO with nothing draining it. If your source is bursty, its
 average over a few milliseconds is what matters. You can make the FIFO deeper with the
 `FIFO_DEPTH` parameter of `fdrec_core_0` (a power of 2, in 128-bit beats).
 

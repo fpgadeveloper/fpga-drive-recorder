@@ -101,12 +101,14 @@ the SSD writes were not completing fast enough. In order of likelihood:
 5. **The rate exceeds the FIFO budget.** If `fdrec` warns that "the ingest FIFO covers only
    ... of the DMA restart gap", the rate is too high for the design's FIFO, whatever the
    SSD; see [Applications](apps.md#tuning-the-fifo-budget-at-buffer-boundaries). Without a
-   warning, a drop of a few hundred to a few thousand beats whose gap starts 64 KiB (plus a few
-   beats) after a buffer boundary is one late DMA restart; this happened rarely in long RAID0
-   recordings with the 1 TB pairs, on `zcu106_hpc0` from 2500 MB/s (Sabrent pair, once also at
-   1750 MB/s over 32 GB) and from 2750 MB/s (980 PRO pair, once also at 3000 MB/s over 10 GB),
-   and on `vck190_fmcp1` from 2250 MB/s (980 PRO pair) upwards (see
-   [Benchmarks](benchmarks.md#long-recordings-past-the-slc-cache)).
+   warning, a drop of a few thousand beats whose gap starts one ingest FIFO depth plus 7 beats
+   after an 8 MiB buffer boundary (262 256 bytes with the 16384-beat FIFO of the reference
+   design) is one late DMA restart. First check that the AXI DMA interrupts are not on CPU0
+   (`dmesg | grep dma-channel`, `/proc/interrupts`; the `dma_irq_cpu` module parameter). With
+   them pinned this happened once in a few hundred GB in 350 GiB RAID0 recordings at 3000 and
+   3200 MB/s on `zcu106_hpc0` with the 980 PRO pair (2750 MB/s clean), and not at all on
+   `vck190_fmcp1` up to 3200 MB/s (see
+   [Benchmarks](benchmarks.md#5-latency-budgets-not-bandwidth)).
 6. **Other I/O on the same SSDs**, a nearly full filesystem, or a filesystem other than XFS
    or ext4.
 
@@ -159,12 +161,13 @@ The sink consumed faster than the SSDs delivered the data.
 * **Read stalls.** Isolated underflow bursts near the read rate are read stalls longer than
   the ring lasts at that rate; more buffers absorb them (see
   [Benchmarks](benchmarks.md#playback)).
-* **One Samsung 980 PRO 1TB on `zcu106_hpc0` at 2500-2750 MB/s.** A single 980 PRO 1TB on
-  `zcu106_hpc0` under-runs by millions of ticks at 2500 and 2750 MB/s in almost every run, while
-  2250 MB/s is clean every time and 3000 MB/s mostly; the idle time and the ring size make no
-  difference, and the cause is not known (see
-  [Benchmarks](benchmarks.md#single-drive-playback-deficit-on-zcu106_hpc0)). Play back at
-  2250 MB/s or less from that drive alone, or use RAID0.
+* **Underflows of millions of ticks in almost every run at one band of rates** (on a Zynq
+  UltraScale+ target typically 2500-2750 MB/s from one drive) mean the AXI DMA playback
+  interrupt is being handled on the CPU that takes the NVMe completions (CPU0), where it
+  waits behind their bursts. Check `dmesg | grep dma-channel` and `/proc/interrupts`: the
+  driver pins both DMA interrupts to the last online CPU by default (module parameter
+  `dma_irq_cpu`, see [Kernel driver](driver.md)); `dma_irq_cpu=-2` or an `irqbalance` daemon
+  moving them back brings the underflows back.
 
 ### `fdplay` stalls and gives up (`--no-check`)
 

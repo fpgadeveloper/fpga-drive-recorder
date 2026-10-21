@@ -117,6 +117,10 @@
 #include <linux/math64.h>
 #include <linux/timekeeping.h>
 #include <linux/iommu.h>
+#include <linux/interrupt.h>
+#include <linux/of.h>
+#include <linux/of_irq.h>
+#include <linux/cpumask.h>
 
 #include "fdrec_regs.h"
 #include "fdrec_uapi.h"
@@ -1864,6 +1868,55 @@ static const struct attribute_group *fdrec_groups[] = {
 /* Platform driver                                                          */
 
 /* The AXI DMA's max_buffer_len, as xilinx_dma derives it (2^width - 1) */
+/*
+ * CPU for the AXI DMA channel interrupts (both channels of the recorder's AXI
+ * DMA). xilinx_dma restarts the next descriptor from its hard-IRQ handler, so
+ * the DMA pauses at every buffer boundary for the latency of that interrupt,
+ * and the ingest / egress FIFO must bridge it (20-30 us at 2.2-3.2 GB/s).
+ * On Zynq UltraScale+ every NVMe completion interrupt of a PL PCIe root port
+ * (XDMA bridge MSI controller, a chained handler) is handled on CPU0, in
+ * bursts of up to ~0.8 ms (512 KB completions with cache invalidation, the
+ * PCIe path being non-coherent). A DMA interrupt on CPU0 waits behind them:
+ * playback under-runs whenever an SSD read completes just before a buffer
+ * boundary (measured: zcu106_hpc0, one 980 PRO, 2500 MB/s, 0/5 clean on CPU0,
+ * 5/5 on CPU3). Default -1: the last online CPU (none if only one CPU is
+ * online); -2: leave the affinity alone; >= 0: that CPU.
+ */
+static int dma_irq_cpu = -1;
+module_param(dma_irq_cpu, int, 0444);
+MODULE_PARM_DESC(dma_irq_cpu, "CPU for the AXI DMA channel IRQs: -1 = last online CPU (default), -2 = do not change, >= 0 = that CPU");
+
+static void fdrec_pin_dma_irqs(struct fdrec_dev *fd)
+{
+	struct device_node *np = fd->dma_dev ? fd->dma_dev->of_node : NULL;
+	struct device_node *child;
+	int cpu = dma_irq_cpu;
+
+	if (cpu == -2 || !np)
+		return;
+	if (cpu == -1) {
+		if (num_online_cpus() < 2)
+			return;
+		cpu = cpumask_last(cpu_online_mask);
+	}
+	if (cpu < 0 || cpu >= nr_cpu_ids || !cpu_online(cpu)) {
+		dev_warn(fd->dev, "dma_irq_cpu=%d is not an online CPU; DMA IRQ affinity unchanged\n", dma_irq_cpu);
+		return;
+	}
+	for_each_child_of_node(np, child) {
+		int irq = of_irq_get(child, 0);
+		int ret;
+
+		if (irq <= 0)
+			continue;
+		ret = irq_set_affinity(irq, cpumask_of(cpu));
+		if (ret)
+			dev_warn(fd->dev, "%pOFn: cannot move IRQ %d to CPU%d (%d)\n", child, irq, cpu, ret);
+		else
+			dev_info(fd->dev, "%pOFn: IRQ %d -> CPU%d\n", child, irq, cpu);
+	}
+}
+
 static u32 fdrec_dma_max_len(struct device *dma_dev)
 {
 	u32 width = XDMA_DEFAULT_LEN_WIDTH;
@@ -1938,6 +1991,7 @@ static int fdrec_probe(struct platform_device *pdev)
 		fd->caps |= FDREC_CAP_MM2S;
 	}
 	fd->max_sg_len = fdrec_dma_max_len(fd->dma_dev);
+	fdrec_pin_dma_irqs(fd);
 	if (dev_is_dma_coherent(fd->dma_dev))
 		dev_info(dev, "DMA device is marked dma-coherent: cache syncs are no-ops\n");
 	if (dma_addressing_limited(fd->dma_dev))

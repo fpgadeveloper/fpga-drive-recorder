@@ -37,6 +37,23 @@ Yocto / EDF 2025.2 flow (no PetaLinux flow, no standalone application). First ta
   seen with the first release, disappeared with the fix. The base design
   [fpga-drive-aximm-pcie](https://github.com/fpgadeveloper/fpga-drive-aximm-pcie) has the same
   HP-port clocking; the fix is to follow there.
+* Driver: the AXI DMA channel interrupts are pinned at probe to the last online CPU (module
+  parameter `dma_irq_cpu`, 2026-10-20). On Zynq UltraScale+ the NVMe completions of the PL
+  root ports are all handled on CPU0 in bursts of up to ~0.8 ms, and a DMA restart interrupt on
+  the same CPU waited behind them: one 980 PRO 1TB on `zcu106_hpc0` under-ran its playback at
+  2500-2750 MB/s in almost every run, and long RAID0 recordings lost beats at buffer
+  boundaries from 2750 MB/s. With the fix the same drive plays back at the 3.2 GB/s sink
+  maximum (52 of 52 runs, single and RAID0).
+* Hardware: ingest FIFO 4096 -> 16384 beats (64 KB -> 256 KB; `FIFO_DEPTH`, 2026-10-20), so the
+  FIFO covers 82 µs of DMA restart at 3.2 GB/s instead of 20 µs. The egress FIFO stays at
+  4096 beats. Measured over 350 GiB RAID0 recordings: `vck190_fmcp1` (Sabrent Rocket 2230 1TB
+  pair) clean at 2750, 3000 and 3200 MB/s (before: 2750); `zcu106_hpc0` (980 PRO pair) clean at
+  2750 MB/s (before: 2500), 3000 and 3200 MB/s still lose beats once in a few hundred GB to a
+  rare 120-240 µs restart. Cost: 42.5 more block RAM tiles on `zcu106_hpc0` (114 to 156.5 of
+  312, WNS +0.253 ns); `uzev` 156.5 of 312 (+0.045 ns), `vck190_fmcp1` 166 of 967 (+0.079 ns). The
+  register map stays at 1.1 (`ING_FIFO_DEPTH` reports the depth; no software change). The
+  [Benchmarks](benchmarks.md) page gives the figures measured with both changes; the earlier
+  figures are in the git history of the documentation (before 2026-10-20).
 * Documentation: this site, with generated block diagrams, the register map, the driver
   and file-format references, and the benchmarks.
 

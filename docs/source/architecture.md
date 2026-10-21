@@ -50,8 +50,8 @@ buffers back into the fabric.
    fractional accumulator sets the average rate, up to one beat per `src_clk` cycle. The
    source models an ADC and cannot be stalled: `TREADY` is ignored.
    See [Replacing the test pattern generator](custom_source.md).
-2. **Ingest** (`fdrec_ingest`) — an asynchronous FIFO (`xpm_fifo_async`, 4096 × 128 bits =
-   64 KB of block RAM) moves the stream from `src_clk` to `dp_clk`. `TREADY` towards the
+2. **Ingest** (`fdrec_ingest`) — an asynchronous FIFO (`xpm_fifo_async`, 16384 × 128 bits =
+   256 KB of block RAM; parameter `FIFO_DEPTH`) moves the stream from `src_clk` to `dp_clk`. `TREADY` towards the
    source is always 1. If a beat arrives while the FIFO is full, the beat is dropped and
    counted (`ING_DROP_COUNT`), and the sticky `OVERFLOW` flag is set. `ING_BEATS_IN` counts
    every beat offered, and `ING_FIFO_HWM` records the highest fill level.
@@ -81,10 +81,13 @@ is the only failure mode, and it is always visible in `ING_DROP_COUNT`.
 2. **Egress** (`fdrec_egress`, inside `fdrec_core`) — an asynchronous FIFO (`xpm_fifo_async`,
    4096 × 129 bits = 64 KB of data, `TDATA` + `TLAST`; parameter `EGR_FIFO_DEPTH`) moves the stream from `dp_clk` to `src_clk`. It is
    **lossless**: when it is full, `TREADY` towards the DMA goes low and the DMA waits. `TKEEP`
-   is ignored (whole 16-byte beats). The FIFO is as deep as the ingest FIFO because the sink
+   is ignored (whole 16-byte beats). The FIFO is needed because the sink
    consumes at a fixed rate and the DMA stream pauses briefly at every buffer boundary (the
-   driver starts the next MM2S descriptor from the completion interrupt, ~13–15 µs): a full
-   64 KB FIFO bridges 65 µs at 1 GB/s and 20 µs at the 3.2 GB/s maximum. `EGR_BEATS_IN` counts beats written, `EGR_FIFO_LEVEL`
+   driver starts the next MM2S descriptor from the completion interrupt, ~10 µs, occasionally
+   more): a full 64 KB FIFO bridges 65 µs at 1 GB/s and 20 µs at the 3.2 GB/s maximum. It is
+   a quarter of the ingest FIFO: a late restart on recording loses data, on playback it shows
+   as an underflow at the sink, and the driver keeps the AXI DMA interrupts off the CPU that
+   handles the NVMe completions (see the driver documentation). `EGR_BEATS_IN` counts beats written, `EGR_FIFO_LEVEL`
    shows the fill level. `EGR_CTRL.FLUSH` makes the FIFO accept and discard everything the DMA
    sends (counted in `EGR_DISCARD`), so a transfer can always complete; during a `SOFT_RST`
    the same discard happens, so a soft reset never wedges the DMA.

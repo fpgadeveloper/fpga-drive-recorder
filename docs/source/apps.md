@@ -263,24 +263,28 @@ Notes:
 At every buffer boundary the AXI DMA pauses briefly: `xilinx_dma` lets the channel go idle at
 the end of the current buffer and its interrupt handler starts the next one (see
 [Kernel driver](driver.md), "Interaction with the `xilinx_dma` driver").
-The gap is about **15 µs** worst case (interrupt latency plus DMA restart), measured on a Zynq
-UltraScale+ target and derived from the ingest FIFO high-water marks of its recordings. The
-FIFO between the DMA and the fabric must bridge it at the stream rate:
+The gap is about **9 µs** at every boundary with a tail of **15-20 µs** (interrupt latency plus
+DMA restart), measured on a Zynq UltraScale+ target with a trace of the DMA interrupt and the
+ingest FIFO high-water marks of its recordings. The FIFO between the DMA and the fabric must
+bridge it at the stream rate:
 
     FIFO bytes / rate  >  ~15 µs
 
 | FIFO | Size | Covers 15 µs up to |
 |------|------|--------------------|
-| ingest (recording) | 4096 beats = 64 KB | 4.4 GB/s (above the 3.2 GB/s source maximum) |
+| ingest (recording) | 16384 beats = 256 KB | 17 GB/s (above the 3.2 GB/s source maximum; the FIFO lasts 82 µs at 3.2 GB/s) |
 | egress (playback) | 4096 beats = 64 KB | 4.4 GB/s |
 | (a 512-beat FIFO, for comparison) | 8 KB | ~550 MB/s |
 
-The 15 µs is typical, not a hard bound: long RAID0 recordings with the 1 TB pairs occasionally
-lost beats to a restart that took longer than the FIFO covers (20-33 µs at 2-3.2 GB/s), on
-`zcu106_hpc0` (Cortex-A53 at 1.2 GHz) from 2500 MB/s (Sabrent pair, once also at 1750 MB/s over
-32 GB) and from 2750 MB/s (980 PRO pair, once also at 3000 MB/s over 10 GB), and on
-`vck190_fmcp1` (Cortex-A72) from 2250 MB/s (980 PRO pair) upwards (see
-[Benchmarks](benchmarks.md#long-recordings-past-the-slc-cache)).
+The 15-20 µs tail is typical, not a hard bound. The figures assume the AXI DMA interrupts
+are handled on a CPU of their own (the driver's `dma_irq_cpu` default); on CPU0 of a Zynq
+UltraScale+ target they queue behind the NVMe completion bursts and the gap reaches 0.2 ms.
+Even then a restart occasionally takes longer than the ingest FIFO covers: in RAID0
+recordings on `zcu106_hpc0` (Cortex-A53 at 1.2 GHz) one boundary in a run took 120-415 µs
+(seen at 2500-3200 MB/s, in 32 GB as well as 350 GiB recordings, with either pair of drives),
+while on `vck190_fmcp1` (Cortex-A72) the longest boundary seen was 59 µs and 3200 MB/s was
+clean over 350 and 480 GiB (see
+[Benchmarks](benchmarks.md#5-latency-budgets-not-bandwidth)).
 
 Below that bound, underflows (playback) or drops (recording) mean the SSD or filesystem is too
 slow; above it they also appear at buffer boundaries however fast the SSD is. `fdplay` and

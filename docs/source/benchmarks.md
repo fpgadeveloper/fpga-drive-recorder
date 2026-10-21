@@ -64,12 +64,13 @@ medians of 3 runs unless noted.
 
 | SSDs | target | PCIe link per SSD | measured |
 |---|---|---|---|
-| 2x Sabrent Rocket 2230 1TB | `vck190_fmcp1` (M.2 M-key Stack FMC on FMCP1) | **Gen4 x4** (16 GT/s) | 2026-10-17 |
-| 2x Samsung 980 PRO 1TB | `vck190_fmcp1` (FPGA Drive FMC Gen4 on FMCP1) | **Gen4 x4** (16 GT/s) | 2026-10-18 |
-| 2x Samsung 980 PRO 1TB | `zcu106_hpc0` (FPGA Drive FMC Gen4 on HPC0) | Gen3 x4 (`8GT/s (downgraded)`: a Gen4 drive on Gen3 Root Ports) | 2026-10-19 |
-| 2x Sabrent Rocket 2230 1TB | `zcu106_hpc0` (M.2 M-key Stack FMC on HPC0) | Gen3 x4 (`8GT/s (downgraded)`: a Gen4 drive on Gen3 Root Ports) | 2026-10-19 |
+| 2x Sabrent Rocket 2230 1TB | `vck190_fmcp1` (M.2 M-key Stack FMC on FMCP1) | **Gen4 x4** (16 GT/s) | 2026-10-17 and 2026-10-20 |
+| 2x Samsung 980 PRO 1TB | `vck190_fmcp1` (FPGA Drive FMC Gen4 on FMCP1) | **Gen4 x4** (16 GT/s) | 2026-10-18 and 2026-10-20 |
+| 2x Samsung 980 PRO 1TB | `zcu106_hpc0` (FPGA Drive FMC Gen4 on HPC0) | Gen3 x4 (`8GT/s (downgraded)`: a Gen4 drive on Gen3 Root Ports) | 2026-10-19 and 2026-10-20 |
+| 2x Sabrent Rocket 2230 1TB | `zcu106_hpc0` (M.2 M-key Stack FMC on HPC0) | Gen3 x4 (`8GT/s (downgraded)`: a Gen4 drive on Gen3 Root Ports) | 2026-10-19 and 2026-10-20 |
 
-All four were measured with the playback-capable images (register map 1.1), with the shipped
+All four were measured with the playback-capable images (register map 1.1; ingest FIFO
+16384 beats, egress FIFO 4096 beats, the AXI DMA interrupts pinned by the driver), with the shipped
 default of 32 x 8 MB buffers, and with a fan on the cards (no thermal throttling: at most 60 °C
 on the Sabrent drives on `vck190_fmcp1` and 67 °C on `zcu106_hpc0`, 49 °C on the 980 PROs on
 `vck190_fmcp1` and 52 °C on `zcu106_hpc0`, 0 thermal-management transitions). The same two
@@ -80,7 +81,9 @@ drives of each pair were used on both boards.
 Targets `vck190_fmcp1` (Versal, two Cortex-A72 cores at 1.4 GHz) and `zcu106_hpc0` (Zynq
 UltraScale+, four Cortex-A53 cores at 1.2 GHz), with the SSD pairs of [Setups](#setups). RAID0 =
 both drives of a pair, 512 KB chunks (`fdsetup-raid0.sh` defaults). The recordings used the
-shipped default ring of 32 x 8 MB buffers unless noted.
+shipped default ring of 32 x 8 MB buffers unless noted. "FIFO high-water" is the highest fill
+level the ingest FIFO (16384 beats) reached during a recording, in beats; "full" means it
+overflowed.
 
 ### Sustained recording rate
 
@@ -96,13 +99,13 @@ cache of these drives, so the last column comes from the
 | target | SSD | layout | 32 GB sweep: highest clean step | fio reference (32 GB) | sustained past the SLC cache |
 |---|---|---|---|---|---|
 | `vck190_fmcp1` | Sabrent Rocket 2230 1TB | single | 1000 MB/s, in the cache (750 dropped once, see below) | 4380 MB/s, in the cache | **1000 MB/s** over 143 GiB |
-| `vck190_fmcp1` | 2x Sabrent Rocket 2230 1TB | RAID0, 512K chunk | 2750 MB/s, in the cache | 4428 MB/s, in the cache | **2750 MB/s** over 240 GiB |
+| `vck190_fmcp1` | 2x Sabrent Rocket 2230 1TB | RAID0, 512K chunk | 3200 MB/s (the generator maximum), in the cache (2500, 3000 and 3200 MB/s clean 2 of 2 each on 2026-10-20; in the 2026-10-17 sweep 3000 and 3200 MB/s each dropped once at the start-up stall, see below) | 4428 MB/s, in the cache | **3200 MB/s** over 350 GiB (2750, 3000 and 3200 MB/s clean, one run each) |
 | `vck190_fmcp1` | Samsung 980 PRO 1TB | single | 3200 MB/s (the generator maximum), in the cache | 4586 MB/s, in the cache | **1750 MB/s** over 240 GiB (2000 MB/s dropped when the cache ended, at 125 GB) |
-| `vck190_fmcp1` | 2x Samsung 980 PRO 1TB | RAID0, 512K chunk | 3200 MB/s (the generator maximum), in the cache | 4718 MB/s, in the cache | **2000 MB/s** over 480 GiB (2250-3200 MB/s dropped 3897-16 643 beats each, one try per rate) |
-| `zcu106_hpc0` | Samsung 980 PRO 1TB | single | 3000 MB/s, in the cache (3200 MB/s exceeds the drive's ~3.04 GB/s on Gen3 x4) | 2974 MB/s, in the cache | **1750 MB/s** over 200 GiB and 221 GiB (2000 MB/s dropped from 127.04 GB, past the ~115-120 GB cache) |
-| `zcu106_hpc0` | 2x Samsung 980 PRO 1TB | RAID0, 512K chunk | 3000 MB/s, in the cache (3200 MB/s lost 430 beats, FIFO overflows) | 3444 MB/s, in the cache (fio CPU-bound) | **2500 MB/s** over 350 GiB (2750-3200 MB/s dropped 846-14 934 beats each, FIFO overflows) |
-| `zcu106_hpc0` | Sabrent Rocket 2230 1TB | single | 2750 MB/s, in the cache (3000 MB/s exceeds the drive's ~2.95 GB/s on Gen3 x4) | 2898 MB/s, in the cache | **1750 MB/s** over 200 GiB (2000 MB/s dropped from 95.95 GB, past the ~72 GB cache) |
-| `zcu106_hpc0` | 2x Sabrent Rocket 2230 1TB | RAID0, 512K chunk | 3200 MB/s (the generator maximum), in the cache (1750 dropped once, see below) | 3319 MB/s, in the cache (fio CPU-bound) | **2250 MB/s** over 350 GiB (2500-3200 MB/s dropped 1226-10 150 beats each, FIFO overflows) |
+| `vck190_fmcp1` | 2x Samsung 980 PRO 1TB | RAID0, 512K chunk | 3200 MB/s (the generator maximum), in the cache | 4718 MB/s, in the cache | **3200 MB/s** over 480 GiB (2250, 2500, 2750, 3000 and 3200 MB/s clean, one run each) |
+| `zcu106_hpc0` | Samsung 980 PRO 1TB | single | 3000 MB/s, in the cache (3200 MB/s exceeds the drive's ~3.04 GB/s on Gen3 x4) | 2984 MB/s, in the cache | **1750 MB/s** over 200 GiB and 221 GiB (2000 MB/s dropped from 127.04 GB, past the ~115-120 GB cache) |
+| `zcu106_hpc0` | 2x Samsung 980 PRO 1TB | RAID0, 512K chunk | 3200 MB/s (the generator maximum), in the cache (high-water mark 3042) | 3493 MB/s, in the cache (fio CPU-bound) | **2750 MB/s** over 350 GiB (3000 MB/s clean in 1 of 2, 3200 MB/s dropped once: one late DMA restart each, see below) |
+| `zcu106_hpc0` | Sabrent Rocket 2230 1TB | single | 2750 MB/s, in the cache (3000 MB/s exceeds the drive's ~2.93 GB/s on Gen3 x4) | 2874 MB/s, in the cache | **1750 MB/s** over 200 GiB (2000 MB/s dropped from 95.95 GB, past the ~72 GB cache) |
+| `zcu106_hpc0` | 2x Sabrent Rocket 2230 1TB | RAID0, 512K chunk | 3200 MB/s (the generator maximum), in the cache (2750 MB/s dropped once to a late DMA restart; clean 3 of 3 in a repeat) | 3355 MB/s, in the cache (fio CPU-bound) | **3000 and 3200 MB/s** over 350 GiB, one run each; 2500 and 2750 MB/s each dropped once (one late DMA restart of 213-364 µs, see below) |
 
 `vck190_fmcp1` with two Sabrent Rocket 2230 1TB (Gen4 x4, 2026-10-17), same method, 32 x 8 MB
 buffers. Single drive: 250 and 500 MB/s clean; 750 MB/s dropped once at 30.86 GB (one gap,
@@ -117,33 +120,35 @@ the highest step that never failed, not a hard limit (see
 file offset, 268 505 200 bytes = the 4 KiB header + 256 MiB, i.e. right after the first ring's
 worth: the first writes after the 60 s idle took longer than the ring lasts at 3 GB/s
 (~85 ms), the start-up stall of [the fstrim finding](#the-fstrim-finding-and-the-ring-size).
-The same rates passed 40 GB with 30 s of idle (see the burst table).
+The same rates passed 40 GB with 30 s of idle (see the burst table) and 32 GB with 60 s of
+idle in 6 of 6 runs at 2500-3200 MB/s on 2026-10-20.
 
 `vck190_fmcp1` with two Samsung 980 PRO 1TB (Gen4 x4, 2026-10-18), same method, 32 x 8 MB
 buffers: every step from 250 to 3200 MB/s (the generator maximum) was clean, single and RAID0
 (high-water marks 2692 and 1871 at 3200 MB/s). All of these steps run inside the drives'
 ~115-120 GB SLC cache. Past the cache one drive holds 1750 MB/s (clean over 240 GiB;
-2000 MB/s drops when the cache ends at 125 GB), the pair 2000 MB/s (clean over 480 GiB); see
+2000 MB/s drops when the cache ends at 125 GB), the pair 3200 MB/s, the generator maximum
+(clean over 480 GiB at 2250, 2500, 2750, 3000 and 3200 MB/s, 2026-10-20); see
 [Long recordings past the SLC cache](#long-recordings-past-the-slc-cache).
 
-`zcu106_hpc0` with two Samsung 980 PRO 1TB (Gen3 x4, 2026-10-19), same method, 32 x 8 MB
-buffers. Single drive: clean up to 3000 MB/s (high-water mark 3219) except one
-3296-beat FIFO overflow at 1750 MB/s (the gap starts 69 744 bytes after an 8 MiB buffer
-boundary); 3200 MB/s drops from 5.06 GB while writing 3037 MB/s, the drive on its Gen3 x4 link.
-RAID0: clean up to 3000 MB/s (high-water mark 2515); 3200 MB/s, the generator maximum, lost
-430 beats in three small FIFO overflows while writing 3197 MB/s. All of these steps run inside
-the 980 PRO's SLC cache (~115-120 GB per drive). Past the cache one drive held 1750 MB/s, the
-RAID0 pair 2500 MB/s (see [Long recordings past the SLC cache](#long-recordings-past-the-slc-cache)).
+`zcu106_hpc0` with two Samsung 980 PRO 1TB (Gen3 x4, 2026-10-20), same method, 32 x 8 MB
+buffers. Single drive: clean up to 3000 MB/s (high-water mark 2930); 3200 MB/s drops from
+5.02 GB while writing 3036 MB/s, the drive on its Gen3 x4 link. RAID0: clean at every step up
+to the generator's 3200 MB/s (high-water mark 3853 at 3000 MB/s, 3042 at 3200 MB/s). All of
+these steps run inside the 980 PRO's SLC cache (~115-120 GB per drive). Past the cache one
+drive held 1750 MB/s, the RAID0 pair 2750 MB/s (see
+[Long recordings past the SLC cache](#long-recordings-past-the-slc-cache)).
 
-`zcu106_hpc0` with two Sabrent Rocket 2230 1TB (Gen3 x4, 2026-10-19), same method, 32 x 8 MB
-buffers. Single drive: clean up to 2750 MB/s (high-water mark 2323); 3000 and 3200 MB/s write
-~2949 MB/s, the drive on its Gen3 x4 link, and drop from 10.10 GB and 1.98 GB. The 3000 MB/s
-step and the 10 GB burst at 3000 MB/s lose their first beat at the same beat number: a fixed
-rate deficit, not a random event. RAID0: clean at every step up to the generator's 3200 MB/s
-(high-water mark 3363), except one 28 925-beat FIFO overflow at 1750 MB/s (the gap starts 65 648
-bytes after an 8 MiB buffer boundary). All of these steps run inside the SLC cache (~72 GB per
-drive, then ~1.8 GB/s); one drive held 1750 MB/s over 200 GiB, the RAID0 pair 2250 MB/s over 350
-GiB (see [Long recordings past the SLC cache](#long-recordings-past-the-slc-cache)).
+`zcu106_hpc0` with two Sabrent Rocket 2230 1TB (Gen3 x4, 2026-10-20), same method, 32 x 8 MB
+buffers. Single drive: clean up to 2750 MB/s, where one DMA restart of about 90 µs took the
+high-water mark to 15 427 of the 16384 beats; 3000 and 3200 MB/s write ~2.93 GB/s, the drive on
+its Gen3 x4 link, and drop from 5.14 GB and 1.98 GB: a fixed rate deficit, not a random event.
+RAID0: clean at every step up to the generator's 3200 MB/s (high-water mark 7517 at 3000 MB/s,
+3560 at 3200 MB/s) except 2750 MB/s, which lost 54 968 beats in one event 0.18 GB into the
+recording (a DMA restart of about 415 µs at a buffer boundary; three repeats at 2750 MB/s were
+clean). All of these steps run inside the SLC cache (~72 GB per drive, then ~1.8 GB/s); one drive
+held 1750 MB/s over 200 GiB, the RAID0 pair 3000 and 3200 MB/s over 350 GiB (see
+[Long recordings past the SLC cache](#long-recordings-past-the-slc-cache)).
 
 fio reference: `fio --name=w --rw=write --bs=8M --direct=1 --ioengine=io_uring --iodepth=8
 --size=32G --filename=/mnt/rec/fio.dat` on the freshly created filesystem, before the sweep.
@@ -154,7 +159,7 @@ Every step of the sweeps ("first gap" is the file offset of the first discontinu
 reported by `fdverify`; "avg MB/s" is the data written divided by the recording time;
 "gaps (1)" = exactly one discontinuity); 32 x 8 MB buffers:
 
-| target | SSD | layout | rate (MB/s) | result | drops (beats) | FIFO high-water (of 4096) | avg MB/s | fdverify | first gap |
+| target | SSD | layout | rate (MB/s) | result | drops (beats) | FIFO high-water (beats) | avg MB/s | fdverify | first gap |
 |---|---|---|---|---|---|---|---|---|---|
 | `vck190_fmcp1` | Sabrent Rocket 2230 1TB | single | 250 | pass | 0 | 169 | 250.0 | pass | - |
 | `vck190_fmcp1` | Sabrent Rocket 2230 1TB | single | 500 | pass | 0 | 372 | 499.9 | pass | - |
@@ -200,58 +205,58 @@ reported by `fdverify`; "avg MB/s" is the data written divided by the recording 
 | `vck190_fmcp1` | 2x Samsung 980 PRO 1TB | RAID0, 512K chunk | 2750 | pass | 0 | 1997 | 2748.3 | pass | - |
 | `vck190_fmcp1` | 2x Samsung 980 PRO 1TB | RAID0, 512K chunk | 3000 | pass | 0 | 2286 | 2998.0 | pass | - |
 | `vck190_fmcp1` | 2x Samsung 980 PRO 1TB | RAID0, 512K chunk | **3200** | pass | 0 | 1871 | 3197.7 | pass | - |
-| `zcu106_hpc0` | Samsung 980 PRO 1TB | single | 250 | pass | 0 | 248 | 250.0 | pass | - |
-| `zcu106_hpc0` | Samsung 980 PRO 1TB | single | 500 | pass | 0 | 499 | 499.9 | pass | - |
-| `zcu106_hpc0` | Samsung 980 PRO 1TB | single | 750 | pass | 0 | 866 | 749.8 | pass | - |
-| `zcu106_hpc0` | Samsung 980 PRO 1TB | single | 1000 | pass | 0 | 1018 | 999.7 | pass | - |
-| `zcu106_hpc0` | Samsung 980 PRO 1TB | single | 1250 | pass | 0 | 963 | 1249.5 | pass | - |
-| `zcu106_hpc0` | Samsung 980 PRO 1TB | single | 1500 | pass | 0 | 1759 | 1499.3 | pass | - |
-| `zcu106_hpc0` | Samsung 980 PRO 1TB | single | 1750 | drops | 3296 | full | 1749.1 | gaps (1) | 21.73 GB |
-| `zcu106_hpc0` | Samsung 980 PRO 1TB | single | 2000 | pass | 0 | 3796 | 1998.8 | pass | - |
-| `zcu106_hpc0` | Samsung 980 PRO 1TB | single | 2250 | pass | 0 | 2388 | 2248.5 | pass | - |
-| `zcu106_hpc0` | Samsung 980 PRO 1TB | single | 2500 | pass | 0 | 2430 | 2498.2 | pass | - |
-| `zcu106_hpc0` | Samsung 980 PRO 1TB | single | 2750 | pass | 0 | 2999 | 2747.9 | pass | - |
-| `zcu106_hpc0` | Samsung 980 PRO 1TB | single | **3000** | pass | 0 | 3219 | 2997.4 | pass | - |
-| `zcu106_hpc0` | Samsung 980 PRO 1TB | single | 3200 | drops | 97 418 114 | full | 3036.9 | gaps | 5.06 GB |
+| `zcu106_hpc0` | Samsung 980 PRO 1TB | single | 250 | pass | 0 | 208 | 250.0 | pass | - |
+| `zcu106_hpc0` | Samsung 980 PRO 1TB | single | 500 | pass | 0 | 429 | 499.9 | pass | - |
+| `zcu106_hpc0` | Samsung 980 PRO 1TB | single | 750 | pass | 0 | 535 | 749.8 | pass | - |
+| `zcu106_hpc0` | Samsung 980 PRO 1TB | single | 1000 | pass | 0 | 888 | 999.7 | pass | - |
+| `zcu106_hpc0` | Samsung 980 PRO 1TB | single | 1250 | pass | 0 | 973 | 1249.5 | pass | - |
+| `zcu106_hpc0` | Samsung 980 PRO 1TB | single | 1500 | pass | 0 | 1443 | 1499.4 | pass | - |
+| `zcu106_hpc0` | Samsung 980 PRO 1TB | single | 1750 | pass | 0 | 1636 | 1749.1 | pass | - |
+| `zcu106_hpc0` | Samsung 980 PRO 1TB | single | 2000 | pass | 0 | 1607 | 1998.8 | pass | - |
+| `zcu106_hpc0` | Samsung 980 PRO 1TB | single | 2250 | pass | 0 | 1771 | 2248.5 | pass | - |
+| `zcu106_hpc0` | Samsung 980 PRO 1TB | single | 2500 | pass | 0 | 2162 | 2498.2 | pass | - |
+| `zcu106_hpc0` | Samsung 980 PRO 1TB | single | 2750 | pass | 0 | 1900 | 2747.9 | pass | - |
+| `zcu106_hpc0` | Samsung 980 PRO 1TB | single | **3000** | pass | 0 | 2930 | 2997.2 | pass | - |
+| `zcu106_hpc0` | Samsung 980 PRO 1TB | single | 3200 | drops | 98 954 778 | full | 3035.8 | gaps (20) | 5.02 GB |
 | `zcu106_hpc0` | 2x Samsung 980 PRO 1TB | RAID0, 512K chunk | 250 | pass | 0 | 207 | 250.0 | pass | - |
-| `zcu106_hpc0` | 2x Samsung 980 PRO 1TB | RAID0, 512K chunk | 500 | pass | 0 | 425 | 499.9 | pass | - |
+| `zcu106_hpc0` | 2x Samsung 980 PRO 1TB | RAID0, 512K chunk | 500 | pass | 0 | 402 | 499.9 | pass | - |
 | `zcu106_hpc0` | 2x Samsung 980 PRO 1TB | RAID0, 512K chunk | 750 | pass | 0 | 715 | 749.9 | pass | - |
-| `zcu106_hpc0` | 2x Samsung 980 PRO 1TB | RAID0, 512K chunk | 1000 | pass | 0 | 792 | 999.8 | pass | - |
-| `zcu106_hpc0` | 2x Samsung 980 PRO 1TB | RAID0, 512K chunk | 1250 | pass | 0 | 930 | 1249.6 | pass | - |
-| `zcu106_hpc0` | 2x Samsung 980 PRO 1TB | RAID0, 512K chunk | 1500 | pass | 0 | 1290 | 1499.4 | pass | - |
-| `zcu106_hpc0` | 2x Samsung 980 PRO 1TB | RAID0, 512K chunk | 1750 | pass | 0 | 1486 | 1749.2 | pass | - |
-| `zcu106_hpc0` | 2x Samsung 980 PRO 1TB | RAID0, 512K chunk | 2000 | pass | 0 | 1782 | 1999.1 | pass | - |
-| `zcu106_hpc0` | 2x Samsung 980 PRO 1TB | RAID0, 512K chunk | 2250 | pass | 0 | 1853 | 2248.8 | pass | - |
-| `zcu106_hpc0` | 2x Samsung 980 PRO 1TB | RAID0, 512K chunk | 2500 | pass | 0 | 2154 | 2498.3 | pass | - |
-| `zcu106_hpc0` | 2x Samsung 980 PRO 1TB | RAID0, 512K chunk | 2750 | pass | 0 | 2512 | 2748.1 | pass | - |
-| `zcu106_hpc0` | 2x Samsung 980 PRO 1TB | RAID0, 512K chunk | **3000** | pass | 0 | 2515 | 2998.0 | pass | - |
-| `zcu106_hpc0` | 2x Samsung 980 PRO 1TB | RAID0, 512K chunk | 3200 | drops | 430 | full | 3197.1 | gaps (3) | 16.28 GB |
-| `zcu106_hpc0` | Sabrent Rocket 2230 1TB | single | 250 | pass | 0 | 210 | 250.0 | pass | - |
-| `zcu106_hpc0` | Sabrent Rocket 2230 1TB | single | 500 | pass | 0 | 445 | 499.9 | pass | - |
-| `zcu106_hpc0` | Sabrent Rocket 2230 1TB | single | 750 | pass | 0 | 617 | 749.8 | pass | - |
-| `zcu106_hpc0` | Sabrent Rocket 2230 1TB | single | 1000 | pass | 0 | 879 | 999.7 | pass | - |
-| `zcu106_hpc0` | Sabrent Rocket 2230 1TB | single | 1250 | pass | 0 | 1067 | 1249.5 | pass | - |
-| `zcu106_hpc0` | Sabrent Rocket 2230 1TB | single | 1500 | pass | 0 | 1488 | 1499.4 | pass | - |
-| `zcu106_hpc0` | Sabrent Rocket 2230 1TB | single | 1750 | pass | 0 | 1810 | 1749.1 | pass | - |
-| `zcu106_hpc0` | Sabrent Rocket 2230 1TB | single | 2000 | pass | 0 | 1916 | 1998.8 | pass | - |
-| `zcu106_hpc0` | Sabrent Rocket 2230 1TB | single | 2250 | pass | 0 | 2957 | 2248.5 | pass | - |
-| `zcu106_hpc0` | Sabrent Rocket 2230 1TB | single | 2500 | pass | 0 | 3102 | 2498.3 | pass | - |
-| `zcu106_hpc0` | Sabrent Rocket 2230 1TB | single | **2750** | pass | 0 | 2323 | 2747.9 | pass | - |
-| `zcu106_hpc0` | Sabrent Rocket 2230 1TB | single | 3000 | drops | 20 928 426 | full | 2949.6 | gaps | 10.10 GB |
-| `zcu106_hpc0` | Sabrent Rocket 2230 1TB | single | 3200 | drops | 164 708 184 | full | 2948.3 | gaps | 1.98 GB |
-| `zcu106_hpc0` | 2x Sabrent Rocket 2230 1TB | RAID0, 512K chunk | 250 | pass | 0 | 199 | 250.0 | pass | - |
-| `zcu106_hpc0` | 2x Sabrent Rocket 2230 1TB | RAID0, 512K chunk | 500 | pass | 0 | 402 | 499.9 | pass | - |
+| `zcu106_hpc0` | 2x Samsung 980 PRO 1TB | RAID0, 512K chunk | 1000 | pass | 0 | 809 | 999.7 | pass | - |
+| `zcu106_hpc0` | 2x Samsung 980 PRO 1TB | RAID0, 512K chunk | 1250 | pass | 0 | 974 | 1249.6 | pass | - |
+| `zcu106_hpc0` | 2x Samsung 980 PRO 1TB | RAID0, 512K chunk | 1500 | pass | 0 | 1237 | 1499.4 | pass | - |
+| `zcu106_hpc0` | 2x Samsung 980 PRO 1TB | RAID0, 512K chunk | 1750 | pass | 0 | 1369 | 1749.2 | pass | - |
+| `zcu106_hpc0` | 2x Samsung 980 PRO 1TB | RAID0, 512K chunk | 2000 | pass | 0 | 1898 | 1999.1 | pass | - |
+| `zcu106_hpc0` | 2x Samsung 980 PRO 1TB | RAID0, 512K chunk | 2250 | pass | 0 | 1712 | 2248.7 | pass | - |
+| `zcu106_hpc0` | 2x Samsung 980 PRO 1TB | RAID0, 512K chunk | 2500 | pass | 0 | 1774 | 2498.5 | pass | - |
+| `zcu106_hpc0` | 2x Samsung 980 PRO 1TB | RAID0, 512K chunk | 2750 | pass | 0 | 2319 | 2748.1 | pass | - |
+| `zcu106_hpc0` | 2x Samsung 980 PRO 1TB | RAID0, 512K chunk | 3000 | pass | 0 | 3853 | 2997.7 | pass | - |
+| `zcu106_hpc0` | 2x Samsung 980 PRO 1TB | RAID0, 512K chunk | **3200** | pass | 0 | 3042 | 3197.1 | pass | - |
+| `zcu106_hpc0` | Sabrent Rocket 2230 1TB | single | 250 | pass | 0 | 207 | 250.0 | pass | - |
+| `zcu106_hpc0` | Sabrent Rocket 2230 1TB | single | 500 | pass | 0 | 477 | 499.9 | pass | - |
+| `zcu106_hpc0` | Sabrent Rocket 2230 1TB | single | 750 | pass | 0 | 595 | 749.8 | pass | - |
+| `zcu106_hpc0` | Sabrent Rocket 2230 1TB | single | 1000 | pass | 0 | 1110 | 999.7 | pass | - |
+| `zcu106_hpc0` | Sabrent Rocket 2230 1TB | single | 1250 | pass | 0 | 1246 | 1249.5 | pass | - |
+| `zcu106_hpc0` | Sabrent Rocket 2230 1TB | single | 1500 | pass | 0 | 1407 | 1499.4 | pass | - |
+| `zcu106_hpc0` | Sabrent Rocket 2230 1TB | single | 1750 | pass | 0 | 2169 | 1749.1 | pass | - |
+| `zcu106_hpc0` | Sabrent Rocket 2230 1TB | single | 2000 | pass | 0 | 1562 | 1998.8 | pass | - |
+| `zcu106_hpc0` | Sabrent Rocket 2230 1TB | single | 2250 | pass | 0 | 1825 | 2248.5 | pass | - |
+| `zcu106_hpc0` | Sabrent Rocket 2230 1TB | single | 2500 | pass | 0 | 2436 | 2498.2 | pass | - |
+| `zcu106_hpc0` | Sabrent Rocket 2230 1TB | single | **2750** | pass | 0 | 15 427 | 2745.9 | pass | - |
+| `zcu106_hpc0` | Sabrent Rocket 2230 1TB | single | 3000 | drops | 33 940 536 | full | 2932.0 | gaps (20) | 5.14 GB |
+| `zcu106_hpc0` | Sabrent Rocket 2230 1TB | single | 3200 | drops | 186 192 196 | full | 2923.0 | gaps (20) | 1.98 GB |
+| `zcu106_hpc0` | 2x Sabrent Rocket 2230 1TB | RAID0, 512K chunk | 250 | pass | 0 | 236 | 250.0 | pass | - |
+| `zcu106_hpc0` | 2x Sabrent Rocket 2230 1TB | RAID0, 512K chunk | 500 | pass | 0 | 682 | 499.9 | pass | - |
 | `zcu106_hpc0` | 2x Sabrent Rocket 2230 1TB | RAID0, 512K chunk | 750 | pass | 0 | 711 | 749.8 | pass | - |
-| `zcu106_hpc0` | 2x Sabrent Rocket 2230 1TB | RAID0, 512K chunk | 1000 | pass | 0 | 887 | 999.7 | pass | - |
-| `zcu106_hpc0` | 2x Sabrent Rocket 2230 1TB | RAID0, 512K chunk | 1250 | pass | 0 | 990 | 1249.6 | pass | - |
-| `zcu106_hpc0` | 2x Sabrent Rocket 2230 1TB | RAID0, 512K chunk | 1500 | pass | 0 | 1136 | 1499.4 | pass | - |
-| `zcu106_hpc0` | 2x Sabrent Rocket 2230 1TB | RAID0, 512K chunk | 1750 | drops | 28 925 | full | 1749.1 | gaps (1) | 25.71 GB |
-| `zcu106_hpc0` | 2x Sabrent Rocket 2230 1TB | RAID0, 512K chunk | 2000 | pass | 0 | 1736 | 1998.9 | pass | - |
-| `zcu106_hpc0` | 2x Sabrent Rocket 2230 1TB | RAID0, 512K chunk | 2250 | pass | 0 | 2042 | 2248.7 | pass | - |
-| `zcu106_hpc0` | 2x Sabrent Rocket 2230 1TB | RAID0, 512K chunk | 2500 | pass | 0 | 3600 | 2498.3 | pass | - |
-| `zcu106_hpc0` | 2x Sabrent Rocket 2230 1TB | RAID0, 512K chunk | 2750 | pass | 0 | 2836 | 2748.1 | pass | - |
-| `zcu106_hpc0` | 2x Sabrent Rocket 2230 1TB | RAID0, 512K chunk | 3000 | pass | 0 | 3781 | 2997.7 | pass | - |
-| `zcu106_hpc0` | 2x Sabrent Rocket 2230 1TB | RAID0, 512K chunk | **3200** | pass | 0 | 3363 | 3196.8 | pass | - |
+| `zcu106_hpc0` | 2x Sabrent Rocket 2230 1TB | RAID0, 512K chunk | 1000 | pass | 0 | 1581 | 999.7 | pass | - |
+| `zcu106_hpc0` | 2x Sabrent Rocket 2230 1TB | RAID0, 512K chunk | 1250 | pass | 0 | 962 | 1249.6 | pass | - |
+| `zcu106_hpc0` | 2x Sabrent Rocket 2230 1TB | RAID0, 512K chunk | 1500 | pass | 0 | 1205 | 1499.4 | pass | - |
+| `zcu106_hpc0` | 2x Sabrent Rocket 2230 1TB | RAID0, 512K chunk | 1750 | pass | 0 | 1581 | 1749.2 | pass | - |
+| `zcu106_hpc0` | 2x Sabrent Rocket 2230 1TB | RAID0, 512K chunk | 2000 | pass | 0 | 2388 | 1998.9 | pass | - |
+| `zcu106_hpc0` | 2x Sabrent Rocket 2230 1TB | RAID0, 512K chunk | 2250 | pass | 0 | 4335 | 2248.7 | pass | - |
+| `zcu106_hpc0` | 2x Sabrent Rocket 2230 1TB | RAID0, 512K chunk | 2500 | pass | 0 | 2090 | 2498.3 | pass | - |
+| `zcu106_hpc0` | 2x Sabrent Rocket 2230 1TB | RAID0, 512K chunk | 2750 | drops (clean in 3 repeats) | 54 968 | full | 2747.9 | gaps (1) | 0.18 GB |
+| `zcu106_hpc0` | 2x Sabrent Rocket 2230 1TB | RAID0, 512K chunk | 3000 | pass | 0 | 7517 | 2997.7 | pass | - |
+| `zcu106_hpc0` | 2x Sabrent Rocket 2230 1TB | RAID0, 512K chunk | **3200** | pass | 0 | 3560 | 3197.1 | pass | - |
 
 In every failing step the gaps sum exactly to the drop count in the file header.
 
@@ -259,16 +264,15 @@ In every failing step the gaps sum exactly to the drop count in the file header.
   no fixed offset (30.86 and 17.36 GB single; 0.27 GB, right after the first ring, on RAID0).
   These are isolated write stalls, not a rate the drive cannot keep up with.
 * **Samsung 980 PRO 1TB** (`zcu106_hpc0`): the single-drive failure at 3200 MB/s writes
-  3037 MB/s, the drive on its Gen3 x4 link; the 1750 MB/s single and the 3200 MB/s RAID0
-  failures are small FIFO overflows (3296 and 430 beats), each starting 69 744 bytes after an
-  8 MiB buffer boundary (a late DMA restart).
+  3036 MB/s, the drive on its Gen3 x4 link; no other step failed on either layout.
 * **Samsung 980 PRO 1TB** (`vck190_fmcp1`, Gen4 x4): no step failed on either layout, up to the
   3.2 GB/s generator maximum.
-* **Sabrent Rocket 2230 1TB** (`zcu106_hpc0`): the single-drive failures write ~2949 MB/s, the
-  drive on its Gen3 x4 link, and lose their first beat at the same offset (a fixed rate
-  deficit); the one RAID0 failure (1750 MB/s) is a single 28 925-beat FIFO overflow 65 648 bytes
-  after an 8 MiB buffer boundary (a late DMA restart), as with the 980 PRO pair. No isolated
-  ~0.65 s write stall as on `vck190_fmcp1` appeared in any recording on this board.
+* **Sabrent Rocket 2230 1TB** (`zcu106_hpc0`): the single-drive failures write ~2.93 GB/s, the
+  drive on its Gen3 x4 link (a fixed rate deficit). The one RAID0 failure (2750 MB/s) is a single
+  54 968-beat FIFO overflow 262 256 bytes after an 8 MiB buffer boundary, i.e. the DMA restart
+  after that boundary took about 415 µs; the drives had one write in flight (see
+  [Where the bottlenecks are](#5-latency-budgets-not-bandwidth)). No isolated ~0.65 s write
+  stall as on `vck190_fmcp1` appeared in any recording on this board.
 
 ### Burst and 40 GB recordings
 
@@ -276,7 +280,7 @@ Single recordings at a fixed rate: 32 x 8 MB buffers, `rm` + `fstrim` + 30 s idl
 10 GB from 1000 MB/s upwards, then 40 GB at the sweep's rate and one step above. "Burst" rows
 are 10 GB recordings; the 40 GB rows are still inside the SLC caches of these drives.
 
-| target | SSD | layout | recording | rate (MB/s) | result | FIFO high-water (of 4096 beats) |
+| target | SSD | layout | recording | rate (MB/s) | result | FIFO high-water (beats) |
 |---|---|---|---|---|---|---|
 | `vck190_fmcp1` | Sabrent Rocket 2230 1TB | single | 10 GB | 1000-3000 (9 steps) | pass, all | 628-2302 |
 | `vck190_fmcp1` | Sabrent Rocket 2230 1TB | single | 10 GB | **3200** | pass (highest burst = the generator maximum) | 2174 |
@@ -292,24 +296,24 @@ are 10 GB recordings; the 40 GB rows are still inside the SLC caches of these dr
 | `vck190_fmcp1` | 2x Samsung 980 PRO 1TB | RAID0, 512K chunk | 10 GB | 1000-3000 (9 steps) | pass, all | 773-2300 |
 | `vck190_fmcp1` | 2x Samsung 980 PRO 1TB | RAID0, 512K chunk | 10 GB | **3200** | pass (highest burst = the generator maximum) | 2607 |
 | `vck190_fmcp1` | 2x Samsung 980 PRO 1TB | RAID0, 512K chunk | 40 GB | **3200** | pass (in the cache; no step above the generator maximum) | 2 |
-| `zcu106_hpc0` | Samsung 980 PRO 1TB | single | 10 GB | 1000-2750 (8 steps) | pass, all | 846-2420 |
-| `zcu106_hpc0` | Samsung 980 PRO 1TB | single | 10 GB | **3000** | pass (highest burst) | 2881 |
-| `zcu106_hpc0` | Samsung 980 PRO 1TB | single | 10 GB | 3200 | drops from 3.30 GB (above the drive's ~3.04 GB/s write rate on Gen3 x4) | full |
-| `zcu106_hpc0` | Samsung 980 PRO 1TB | single | 40 GB | **3000** | pass (in the cache) | 3146 |
-| `zcu106_hpc0` | Samsung 980 PRO 1TB | single | 40 GB | 3200 | drops from 4.78 GB | full |
-| `zcu106_hpc0` | 2x Samsung 980 PRO 1TB | RAID0, 512K chunk | 10 GB | 1000-2500 (7 steps) | pass, all | 753-1858 |
-| `zcu106_hpc0` | 2x Samsung 980 PRO 1TB | RAID0, 512K chunk | 10 GB | **2750** | pass (highest clean step of this sweep) | 2077 |
-| `zcu106_hpc0` | 2x Samsung 980 PRO 1TB | RAID0, 512K chunk | 10 GB | 3000 | drops: 1167 beats, once (first gap 2.70 GB; FIFO overflows) | full |
-| `zcu106_hpc0` | 2x Samsung 980 PRO 1TB | RAID0, 512K chunk | 40 GB | **3000** | pass (in the cache) | 2096 |
-| `zcu106_hpc0` | 2x Samsung 980 PRO 1TB | RAID0, 512K chunk | 40 GB | **3200** | pass (in the cache; the generator maximum) | 3854 |
-| `zcu106_hpc0` | Sabrent Rocket 2230 1TB | single | 10 GB | 1000-2500 (7 steps) | pass, all | 812-2198 |
-| `zcu106_hpc0` | Sabrent Rocket 2230 1TB | single | 10 GB | **2750** | pass (highest burst) | 2196 |
-| `zcu106_hpc0` | Sabrent Rocket 2230 1TB | single | 10 GB | 3000 | drops from 10.10 GB (above the drive's ~2.95 GB/s write rate) | full |
-| `zcu106_hpc0` | Sabrent Rocket 2230 1TB | single | 40 GB | **2750** | pass (in the cache) | 3453 |
-| `zcu106_hpc0` | Sabrent Rocket 2230 1TB | single | 40 GB | 3000 | drops from 9.37 GB | full |
-| `zcu106_hpc0` | 2x Sabrent Rocket 2230 1TB | RAID0, 512K chunk | 10 GB | 1000-3000 (9 steps) | pass, all | 730-2682 |
-| `zcu106_hpc0` | 2x Sabrent Rocket 2230 1TB | RAID0, 512K chunk | 10 GB | **3200** | pass (highest burst = the generator maximum) | 3528 |
-| `zcu106_hpc0` | 2x Sabrent Rocket 2230 1TB | RAID0, 512K chunk | 40 GB | **3200** | pass (in the cache; no step above the generator maximum) | 4034 |
+| `zcu106_hpc0` | Samsung 980 PRO 1TB | single | 10 GB | 1000-2750 (8 steps) | pass, all | 974-2121 |
+| `zcu106_hpc0` | Samsung 980 PRO 1TB | single | 10 GB | **3000** | pass (highest burst) | 2107 |
+| `zcu106_hpc0` | Samsung 980 PRO 1TB | single | 10 GB | 3200 | drops from 4.74 GB (above the drive's ~3.04 GB/s write rate on Gen3 x4) | full |
+| `zcu106_hpc0` | Samsung 980 PRO 1TB | single | 40 GB | **3000** | pass (in the cache) | 2312 |
+| `zcu106_hpc0` | Samsung 980 PRO 1TB | single | 40 GB | 3200 | drops from 5.07 GB | full |
+| `zcu106_hpc0` | 2x Samsung 980 PRO 1TB | RAID0, 512K chunk | 10 GB | 1000-3000 (9 steps) | pass, all | 722-2114 |
+| `zcu106_hpc0` | 2x Samsung 980 PRO 1TB | RAID0, 512K chunk | 10 GB | **3200** | pass (highest burst = the generator maximum) | 2392 |
+| `zcu106_hpc0` | 2x Samsung 980 PRO 1TB | RAID0, 512K chunk | 40 GB | **3000** | pass (in the cache) | 4344 |
+| `zcu106_hpc0` | 2x Samsung 980 PRO 1TB | RAID0, 512K chunk | 40 GB | **3200** | pass (in the cache; no step above the generator maximum) | 2747 |
+| `zcu106_hpc0` | Sabrent Rocket 2230 1TB | single | 10 GB | 1000-2500 (7 steps) | pass, all | 774-3953 |
+| `zcu106_hpc0` | Sabrent Rocket 2230 1TB | single | 10 GB | **2750** | pass (highest burst) | 2129 |
+| `zcu106_hpc0` | Sabrent Rocket 2230 1TB | single | 10 GB | 3000 | drops from 7.18 GB (above the drive's ~2.93 GB/s write rate) | full |
+| `zcu106_hpc0` | Sabrent Rocket 2230 1TB | single | 40 GB | **2750** | pass (in the cache) | 2912 |
+| `zcu106_hpc0` | Sabrent Rocket 2230 1TB | single | 40 GB | 3000 | drops from 7.26 GB | full |
+| `zcu106_hpc0` | 2x Sabrent Rocket 2230 1TB | RAID0, 512K chunk | 10 GB | 1000-3000 (9 steps) | pass, all | 746-2819 |
+| `zcu106_hpc0` | 2x Sabrent Rocket 2230 1TB | RAID0, 512K chunk | 10 GB | **3200** | pass (highest burst = the generator maximum) | 2486 |
+| `zcu106_hpc0` | 2x Sabrent Rocket 2230 1TB | RAID0, 512K chunk | 40 GB | **3000** | pass (in the cache) | 2263 |
+| `zcu106_hpc0` | 2x Sabrent Rocket 2230 1TB | RAID0, 512K chunk | 40 GB | **3200** | pass (in the cache; no step above the generator maximum) | 3744 |
 
 * **Sabrent Rocket 2230 1TB** (`vck190_fmcp1`): no step failed. Both layouts record 10 GB at
   3.2 GB/s, the generator maximum, and the "one step above" 40 GB recordings passed too.
@@ -319,15 +323,12 @@ are 10 GB recordings; the 40 GB rows are still inside the SLC caches of these dr
   session; this was not investigated (the drop counters and `fdverify` are what the table is
   judged by).
 * **Sabrent Rocket 2230 1TB** (`zcu106_hpc0`): one drive bursts 10 and 40 GB at 2750 MB/s
-  (3000 MB/s exceeds its ~2.95 GB/s write rate on Gen3 x4); RAID0 records 10 and 40 GB at the
-  generator's 3200 MB/s (40 GB with 62 beats of FIFO to spare).
+  (3000 MB/s exceeds its ~2.93 GB/s write rate on Gen3 x4); RAID0 records 10 and 40 GB at the
+  generator's 3200 MB/s (40 GB with a high-water mark of 3744 of 16384).
 * **Samsung 980 PRO 1TB** (`zcu106_hpc0`): one drive bursts 10 and 40 GB at 3000 MB/s (3200 MB/s
-  exceeds its ~3.04 GB/s write rate on Gen3 x4). Between 2750 and 3200 MB/s the RAID0 pair was
-  clean in 6 of 8 in-cache recordings of 10-40 GB (32 GB at 2750 MB/s and twice at 3000 MB/s,
-  10 GB at 2750 MB/s, 40 GB at 3000 and 3200 MB/s); the two failures (430 beats at 3200 MB/s over
-  32 GB, 1167 beats at 3000 MB/s over 10 GB) are single overflows of the 64 KB fabric FIFO at a
-  buffer boundary, not a deficit of the SSDs or the ring; see
-  [Where the bottlenecks are](#5-latency-budgets-not-bandwidth).
+  exceeds its ~3.04 GB/s write rate on Gen3 x4). RAID0 records 10 and 40 GB at the generator's
+  3200 MB/s, and 32 GB at 2750, 3000 and 3200 MB/s in 9 of 9 further runs (high-water marks
+  2187-4271).
 
 ### Long recordings past the SLC cache
 
@@ -336,68 +337,78 @@ holds for a long recording was measured with single recordings of about 1.5 to t
 the cache (fresh XFS, `rm` + `fstrim` and **300 s** of idle before each, 32 x 8 MB buffers). Sizes are the
 `fdrec --size` values (GiB), with GB (10⁹ bytes) in brackets.
 
-| target | SSD | layout | recording | rate (MB/s) | result | drops (beats) | FIFO high-water (of 4096) | first gap |
+| target | SSD | layout | recording | rate (MB/s) | result | drops (beats) | FIFO high-water (beats) | first gap |
 |---|---|---|---|---|---|---|---|---|
 | `vck190_fmcp1` | Sabrent Rocket 2230 1TB | single | 143 GiB (153.5 GB, ~2x the cache) | **1000** | pass, `fdverify` PASS | 0 | 790 | - |
 | `vck190_fmcp1` | 2x Sabrent Rocket 2230 1TB | RAID0, 512K chunk | 240 GiB (257.7 GB, ~1.8x the cache) | **2750** | pass, `fdverify` PASS | 0 | 3257 | - |
+| `vck190_fmcp1` | 2x Sabrent Rocket 2230 1TB | RAID0, 512K chunk | 350 GiB (375.8 GB, ~2.6x the pair's cache) | **2750** | pass, `fdverify` PASS | 0 | 7194 | - |
+| `vck190_fmcp1` | 2x Sabrent Rocket 2230 1TB | RAID0, 512K chunk | 350 GiB | **3000** | pass, `fdverify` PASS | 0 | 6457 | - |
+| `vck190_fmcp1` | 2x Sabrent Rocket 2230 1TB | RAID0, 512K chunk | 350 GiB | **3200** | pass, `fdverify` PASS | 0 | 11 812 | - |
 | `vck190_fmcp1` | Samsung 980 PRO 1TB | single | 240 GiB (257.7 GB, ~2.1x the cache) | **1750** | pass, `fdverify` PASS | 0 | 1588 | - |
 | `vck190_fmcp1` | Samsung 980 PRO 1TB | single | 240 GiB | 2000 | drops | 969 436 129 | full | 125.17 GB (the cache end) |
-| `vck190_fmcp1` | 2x Samsung 980 PRO 1TB | RAID0, 512K chunk | 480 GiB (515.4 GB, ~2x the cache) | 3200 | drops | 15 181 (3 events) | full | 415.13 GB (past the cache) |
-| `vck190_fmcp1` | 2x Samsung 980 PRO 1TB | RAID0, 512K chunk | 480 GiB | 3000 | drops | 16 643 (3 events) | full | 25.69 GB (inside the cache) |
-| `vck190_fmcp1` | 2x Samsung 980 PRO 1TB | RAID0, 512K chunk | 480 GiB | 2750 | drops | 3897 (one event) | full | 65.41 GB (inside the cache) |
-| `vck190_fmcp1` | 2x Samsung 980 PRO 1TB | RAID0, 512K chunk | 480 GiB | 2500 | drops | 16 584 (2 events) | full | 19.98 GB (inside the cache) |
-| `vck190_fmcp1` | 2x Samsung 980 PRO 1TB | RAID0, 512K chunk | 480 GiB | 2250 | drops | 15 358 (one event) | full | 434.50 GB (past the cache) |
-| `vck190_fmcp1` | 2x Samsung 980 PRO 1TB | RAID0, 512K chunk | 480 GiB | **2000** | pass, `fdverify` PASS | 0 | 3050 | - |
+| `vck190_fmcp1` | 2x Samsung 980 PRO 1TB | RAID0, 512K chunk | 480 GiB (515.4 GB, ~2x the cache) | 2250 | pass, `fdverify` PASS | 0 | 2329 | - |
+| `vck190_fmcp1` | 2x Samsung 980 PRO 1TB | RAID0, 512K chunk | 480 GiB | 2500 | pass, `fdverify` PASS | 0 | 2604 | - |
+| `vck190_fmcp1` | 2x Samsung 980 PRO 1TB | RAID0, 512K chunk | 480 GiB | 2750 | pass, `fdverify` PASS | 0 | 4193 | - |
+| `vck190_fmcp1` | 2x Samsung 980 PRO 1TB | RAID0, 512K chunk | 480 GiB | 3000 | pass, `fdverify` PASS | 0 | 7112 | - |
+| `vck190_fmcp1` | 2x Samsung 980 PRO 1TB | RAID0, 512K chunk | 480 GiB | **3200** | pass, `fdverify` PASS | 0 | 8896 | - |
 | `zcu106_hpc0` | Samsung 980 PRO 1TB | single | 200 GiB (214.7 GB, ~1.8x the cache) | 3000 | drops | 3 920 223 261 | full | 121.52 GB (the cache end) |
 | `zcu106_hpc0` | Samsung 980 PRO 1TB | single | 200 GiB | 3200 | drops (above the drive's write rate) | 4 920 282 959 | full | 0.88 GB |
 | `zcu106_hpc0` | Samsung 980 PRO 1TB | single | 200 GiB | 2000 | drops (past the cache, TLC ~1.77 GB/s) | 650 031 494 | full | 127.04 GB |
 | `zcu106_hpc0` | Samsung 980 PRO 1TB | single | 200 GiB | **1750** | pass, `fdverify` PASS | 0 | 2292 | - |
 | `zcu106_hpc0` | Samsung 980 PRO 1TB | single | 221 GiB (237.3 GB, ~2x the cache) | **1750** | pass, `fdverify` PASS | 0 | 1896 | - |
-| `zcu106_hpc0` | 2x Samsung 980 PRO 1TB | RAID0, 512K chunk | 350 GiB (375.8 GB, ~1.5x the pair's cache) | 3000 | drops | 846 | full | 188.32 GB (past the cache) |
-| `zcu106_hpc0` | 2x Samsung 980 PRO 1TB | RAID0, 512K chunk | 350 GiB | 3200 | drops | 1191 | full | 3.83 GB (inside the cache) |
-| `zcu106_hpc0` | 2x Samsung 980 PRO 1TB | RAID0, 512K chunk | 350 GiB | 2750 | drops | 14 934 (one event) | full | 17.51 GB (inside the cache) |
-| `zcu106_hpc0` | 2x Samsung 980 PRO 1TB | RAID0, 512K chunk | 350 GiB | **2500** | pass, `fdverify` PASS | 0 | 2627 | - |
-| `zcu106_hpc0` | Sabrent Rocket 2230 1TB | single | 200 GiB (214.7 GB, ~3x the cache) | 2750 | drops | 4 350 513 076 | full | 10.39 GB (68 beats, a FIFO overflow inside the cache; then past the cache) |
+| `zcu106_hpc0` | 2x Samsung 980 PRO 1TB | RAID0, 512K chunk | 350 GiB (375.8 GB, ~1.5x the pair's cache) | **2750** | pass, `fdverify` PASS | 0 | 4359 | - |
+| `zcu106_hpc0` | 2x Samsung 980 PRO 1TB | RAID0, 512K chunk | 350 GiB | 3000 | drops | 29 165 (one event) | full | 16.53 GB (inside the cache) |
+| `zcu106_hpc0` | 2x Samsung 980 PRO 1TB | RAID0, 512K chunk | 350 GiB | **3000** (repeat) | pass, `fdverify` PASS | 0 | 4825 | - |
+| `zcu106_hpc0` | 2x Samsung 980 PRO 1TB | RAID0, 512K chunk | 350 GiB | 3200 | drops | 8085 (one event) | full | 257.16 GB (past the cache) |
+| `zcu106_hpc0` | Sabrent Rocket 2230 1TB | single | 200 GiB (214.7 GB, ~3x the cache) | 2750 | drops (above the drive's post-cache rate) | 4 350 513 076 | full | 10.39 GB (68 beats), then past the cache |
 | `zcu106_hpc0` | Sabrent Rocket 2230 1TB | single | 200 GiB | 3000 | drops (above the drive's write rate) | 5 344 583 747 | full | 0.49 GB |
 | `zcu106_hpc0` | Sabrent Rocket 2230 1TB | single | 200 GiB | 2000 | drops (past the cache, TLC ~1.8 GB/s) | 785 285 387 | full | 95.95 GB |
 | `zcu106_hpc0` | Sabrent Rocket 2230 1TB | single | 200 GiB | **1750** | pass, `fdverify` PASS | 0 | 2567 | - |
-| `zcu106_hpc0` | 2x Sabrent Rocket 2230 1TB | RAID0, 512K chunk | 350 GiB (375.8 GB, ~2.6x the pair's cache) | 3200 | drops | 10 150 (2-3 events) | full | 58.29 GB |
-| `zcu106_hpc0` | 2x Sabrent Rocket 2230 1TB | RAID0, 512K chunk | 350 GiB | 2750 | drops | 1929 (one event) | full | 232.33 GB |
-| `zcu106_hpc0` | 2x Sabrent Rocket 2230 1TB | RAID0, 512K chunk | 350 GiB | 2500 | drops | 1226 (first event 210) | full | 74.87 GB |
-| `zcu106_hpc0` | 2x Sabrent Rocket 2230 1TB | RAID0, 512K chunk | 350 GiB | **2250** | pass, `fdverify` PASS | 0 | 3221 | - |
+| `zcu106_hpc0` | 2x Sabrent Rocket 2230 1TB | RAID0, 512K chunk | 350 GiB (375.8 GB, ~2.6x the pair's cache) | 2500 | drops | 40 425 (one event) | full | 323.92 GB (past the cache) |
+| `zcu106_hpc0` | 2x Sabrent Rocket 2230 1TB | RAID0, 512K chunk | 350 GiB | 2750 | drops | 20 256 (one event) | full | 354.75 GB (past the cache) |
+| `zcu106_hpc0` | 2x Sabrent Rocket 2230 1TB | RAID0, 512K chunk | 350 GiB | **3000** | pass, `fdverify` PASS | 0 | 16 363 | - |
+| `zcu106_hpc0` | 2x Sabrent Rocket 2230 1TB | RAID0, 512K chunk | 350 GiB | **3200** | pass, `fdverify` PASS | 0 | 9323 | - |
 
 * **Sabrent Rocket 2230 1TB on `vck190_fmcp1`**: the sweep's rates hold past the cache. The post-cache write
   rate (~1.8 GB/s per drive, ~3.6 GB/s for the pair, see [The SLC cache](#the-slc-cache)) is
-  far above them; what limits the single drive is the rare ~0.65 s write stall, and the RAID0
-  run's high-water mark (3257 of 4096) shows little margin at 2750 MB/s.
+  far above them; what limits the single drive is the rare ~0.65 s write stall. The RAID0 pair
+  recorded 350 GiB at 2750, 3000 and 3200 MB/s (the generator maximum) with 0 drops, one run
+  each, with 0-1 writes in flight in every 10 s sample (at most 8 of 32 buffers). The high-water
+  marks of those runs (6457-11 812 of 16384) were each set by one DMA restart at a buffer boundary
+  of 34-59 µs; all other boundaries stayed at 2100-3000 beats (see
+  [Where the bottlenecks are](#5-latency-budgets-not-bandwidth)).
 * **Samsung 980 PRO 1TB on `zcu106_hpc0`, single**: 1750 MB/s holds over 200 GiB and 221 GiB;
   2000 MB/s drops from 127 GB, just past the cache (the drive then writes ~1.78-1.80 GB/s), and
   3000 MB/s from 121.5 GB, where the cache ends. Up to the cache end one or two writes were in
   flight, after it four to eight: the margin at 1750 MB/s is about 1 % (the post-cache rate is
   1768 MB/s, median).
-* **Samsung 980 PRO 1TB on `zcu106_hpc0`, RAID0**: 2500 MB/s holds over 350 GiB; at
-  2750-3200 MB/s each 350 GiB run lost 846-14 934 beats in one or a few FIFO overflows at a
-  buffer boundary, inside and past the cache. Every first gap starts 69 744 bytes (64 KiB +
-  4208 B) after an 8 MiB buffer boundary: the 64 KB fabric FIFO filled while the AXI DMA restart
-  at the boundary was late (the FIFO covers 26 µs at 2.5 GB/s, 22 µs at 3 GB/s). This is host
-  interrupt latency on the Cortex-A53, not the SSDs.
+* **Samsung 980 PRO 1TB on `zcu106_hpc0`, RAID0**: 2750 MB/s holds over 350 GiB (high-water
+  mark 4359 of 16384); 3000 MB/s held in one run of two (4825) and lost 29 165 beats in the
+  other, and 3200 MB/s lost 8085 beats, in each case at a single 8 MiB buffer boundary where the
+  AXI DMA restart took about 240 µs and 120 µs (the gap starts 262 256 bytes = 16384 + 7 beats
+  after the boundary: the FIFO filled before the DMA took any of the next buffer). The other
+  boundaries of those runs stayed below 46 µs (high-water marks 7155-9164). Writes in flight
+  never exceeded 8 of 32 buffers, inside or past the cache: the limit is the host's restart
+  latency on the Cortex-A53, not the SSDs (see
+  [Where the bottlenecks are](#5-latency-budgets-not-bandwidth)).
 * **Samsung 980 PRO 1TB on `vck190_fmcp1`, single**: 1750 MB/s holds over 240 GiB. Inside the
   cache 0-1 writes were in flight, after it 1-5: the drive's post-cache rate (~1.77 GB/s) is only
   ~1 % above the recording rate. At 2000 MB/s the recording is clean until the cache ends
   (125.17 GB) and then drops 15.5 GB of data.
-* **Samsung 980 PRO 1TB on `vck190_fmcp1`, RAID0**: the pair writes ~3.47 GB/s after its cache,
-  above every rate tested, yet every 480 GiB recording from 2250 to 3200 MB/s lost 3897-16 643
-  beats (62-266 KB in 515 GB) in 1-3 isolated events, inside and past the cache alike, with only
-  1-8 writes in flight: FIFO overflows while a DMA restart was late (the 64 KB FIFO lasts
-  20-29 µs at these rates), the same signature as on `zcu106_hpc0`, not the SSDs. The first clean
-  rate over 480 GiB was 2000 MB/s. Each rate was tried once, so how often 2250-3200 MB/s passes a
-  long recording is not known; over 32 and 40 GB the pair records 3200 MB/s cleanly.
+* **Samsung 980 PRO 1TB on `vck190_fmcp1`, RAID0**: the pair writes ~3.47 GB/s after its cache. It
+  recorded 480 GiB at 2250, 2500, 2750, 3000 and 3200 MB/s (the generator maximum) with 0 drops,
+  one run each, with 0-1 writes in flight in most 10 s samples (at most 8 of 32 buffers). The
+  high-water marks at 2750-3200 MB/s (4193-8896 of 16384) were each set by one DMA restart at a
+  buffer boundary of 24-44 µs (at 137-256 GB, inside or at the end of the cache); all other
+  boundaries stayed below 3600 beats (see
+  [Where the bottlenecks are](#5-latency-budgets-not-bandwidth)).
 * **Sabrent Rocket 2230 1TB on `zcu106_hpc0`**: the ~72 GB cache shows; one drive held
   1750 MB/s over 200 GiB (2000 MB/s drops from 95.95 GB, just past the cache: the post-cache
-  rate is ~1.8 GB/s, as on `vck190_fmcp1`). The RAID0 pair held 2250 MB/s over 350 GiB; at
-  2500-3200 MB/s each 350 GiB run lost 1226-10 150 beats in one to three FIFO overflows at a
-  buffer boundary (every first gap starts 65 648 bytes after an 8 MiB boundary), not to the
-  drives.
+  rate is ~1.8 GB/s, as on `vck190_fmcp1`). The RAID0 pair recorded 3000 and 3200 MB/s cleanly
+  over 350 GiB (one run each; the 3000 MB/s run came within 21 beats of the 16384-beat FIFO).
+  At 2500 and 2750 MB/s one run each lost 40 425 and 20 256 beats in a single late DMA restart
+  (about 364 and 213 µs) at a buffer boundary past the cache, with the drives keeping up (0-3
+  writes in flight in every 10 s sample).
 
 ### Playback
 
@@ -408,48 +419,43 @@ queue depth 8. Each run plays a 10 GB test-pattern recording made at 1000 MB/s w
 | target | SSD | layout | buffers | highest clean playback rate | runs | first rate with underflows | read fio reference |
 |---|---|---|---|---|---|---|---|
 | `vck190_fmcp1` | Sabrent Rocket 2230 1TB | single | 32 x 8 MB and 16 x 8 MB | **3200 MB/s** (the sink maximum) | 3/3 each | none (no higher rate exists) | 4259 and 4465 MB/s; 4529 MB/s with hugepage fixed buffers |
-| `vck190_fmcp1` | 2x Sabrent Rocket 2230 1TB | RAID0, 512K chunk | 32 x 8 MB | **3200 MB/s** (marginal) | sweep clean; 2 of 3 runs at 3200 | 3200 in one confirmation run (3414 ticks) | 4125 and 4258 MB/s; 7792 MB/s with hugepage fixed buffers |
+| `vck190_fmcp1` | 2x Sabrent Rocket 2230 1TB | RAID0, 512K chunk | 32 x 8 MB | **3200 MB/s** (the sink maximum) | 2/2 at every step from 1000 MB/s (2026-10-20); 2 of 3 at 3200 on 2026-10-17 (3414 ticks once) | none (no higher rate exists) | 4125 and 4258 MB/s; 7792 MB/s with hugepage fixed buffers |
 | `vck190_fmcp1` | 2x Sabrent Rocket 2230 1TB | RAID0, 512K chunk | 16 x 8 MB | **3000 MB/s** | 3/3 | 3200 (2865 ticks in the sweep; the recheck was clean) | as above |
-| `vck190_fmcp1` | Samsung 980 PRO 1TB | single | 32 x 8 MB | **3000 MB/s** | 3/3 (3200 MB/s: clean in 3 of 4 runs) | 3200 MB/s (993 ticks in the sweep; the recheck was clean) | 4602 and 4828 MB/s; 6312 MB/s with hugepage fixed buffers |
-| `vck190_fmcp1` | Samsung 980 PRO 1TB | single | 16 x 8 MB | **3000 MB/s** | 3/3 | 3200 MB/s (498 314 ticks in the sweep; the recheck was clean) | as above |
-| `vck190_fmcp1` | 2x Samsung 980 PRO 1TB | RAID0, 512K chunk | 32 x 8 MB | **3200 MB/s** in the sweep (marginal) | 1 of 3 at 3200; 14 of 20 runs clean from 2500 to 3200 MB/s over the session | 3200 in both confirmations (52 684 and 68 523 ticks); isolated stalls at any rate from 2500 | 4430 and 4531 MB/s; 7936 MB/s with hugepage fixed buffers |
-| `vck190_fmcp1` | 2x Samsung 980 PRO 1TB | RAID0, 512K chunk | 16 x 8 MB | **3200 MB/s** (the sink maximum) | 3/3 | none (no higher rate exists) | as above |
-| `zcu106_hpc0` | 2x Samsung 980 PRO 1TB | RAID0, 512K chunk | 32 x 8 MB | **2250 MB/s** (marginal) | 2/3 (49 785 ticks once) | 2500 MB/s (89 891 ticks; the recheck was clean) | 2812 and 2926 MB/s (fio CPU-bound); 5965 MB/s with hugepage fixed buffers |
-| `zcu106_hpc0` | 2x Samsung 980 PRO 1TB | RAID0, 512K chunk | 16 x 8 MB | **3200 MB/s** (the sink maximum) | 2/3 (231 371 ticks once) | none (no higher rate exists) | as above |
-| `zcu106_hpc0` | Samsung 980 PRO 1TB | single | 32 x 8 MB and 16 x 8 MB | **2250 MB/s** | 3/3 each (9/9 over the session) | 2500 MB/s (53 732 to 37.7 M ticks; clean in 1 of 12 runs at 2500, 0 of 3 at 2750; 3000 clean in 3 of 5) | 2845 and 2856 MB/s (fio CPU-bound); 3182 MB/s with hugepage fixed buffers |
-| `zcu106_hpc0` | Sabrent Rocket 2230 1TB | single | 32 x 8 MB and 16 x 8 MB | **2250 MB/s** | 3/3 each | 2500 MB/s (372 270 and 102 266 ticks; both rechecks clean) | 2858 and 2886 MB/s (fio CPU-bound); 3124 MB/s with hugepage fixed buffers |
-| `zcu106_hpc0` | 2x Sabrent Rocket 2230 1TB | RAID0, 512K chunk | 32 x 8 MB | **2250 MB/s** (marginal) | 2/3 (322 679 ticks once) | 2500 MB/s (6003 ticks; the recheck was clean) | 2784 and 2710 MB/s (fio CPU-bound); 5138 MB/s with hugepage fixed buffers |
-| `zcu106_hpc0` | 2x Sabrent Rocket 2230 1TB | RAID0, 512K chunk | 16 x 8 MB | **2500 MB/s** | 3/3 | 2750 MB/s (6622 ticks; the recheck was clean) | as above |
+| `vck190_fmcp1` | Samsung 980 PRO 1TB | single | 32 x 8 MB and 16 x 8 MB | **3200 MB/s** (the sink maximum) | 3/3 each (every sweep step from 1000 MB/s clean; 3 of 3 at 2500, 2750 and 3000 MB/s and 5 of 5 at 3200 MB/s with each buffer count) | none (no higher rate exists) | 4766 and 4950 MB/s; 6309 MB/s with hugepage fixed buffers |
+| `vck190_fmcp1` | 2x Samsung 980 PRO 1TB | RAID0, 512K chunk | 32 x 8 MB and 16 x 8 MB | **3200 MB/s** (the sink maximum) | 3/3 each (every sweep step from 1000 MB/s clean; 3 of 3 at 2500, 2750 and 3000 MB/s and 5 of 5 at 3200 MB/s with each buffer count) | none (no higher rate exists) | 4751 and 4966 MB/s; 7781 MB/s with hugepage fixed buffers |
+| `zcu106_hpc0` | 2x Samsung 980 PRO 1TB | RAID0, 512K chunk | 32 x 8 MB and 16 x 8 MB | **3200 MB/s** (the sink maximum) | 3/3 each (every sweep step from 1000 MB/s clean) | none (no higher rate exists) | 2958 and 2972 MB/s (fio CPU-bound); 5955 MB/s with hugepage fixed buffers |
+| `zcu106_hpc0` | Samsung 980 PRO 1TB | single | 32 x 8 MB and 16 x 8 MB | **3200 MB/s** (the sink maximum) | 3/3 each (every sweep step from 1000 MB/s clean) | none (no higher rate exists) | 2870 and 2889 MB/s (fio CPU-bound); 3183 MB/s with hugepage fixed buffers |
+| `zcu106_hpc0` | Sabrent Rocket 2230 1TB | single | 32 x 8 MB and 16 x 8 MB | **3000 MB/s** | 3/3 each (every sweep step from 1000 MB/s clean) | 3200 MB/s (3 325 445 and 3 206 566 ticks with 32 buffers, 11 477 155 and 9 887 586 with 16, sweep and recheck: above the slot's ~3.12 GB/s read rate on Gen3 x4) | 2923 and 2964 MB/s (fio CPU-bound); 3124 MB/s with hugepage fixed buffers |
+| `zcu106_hpc0` | 2x Sabrent Rocket 2230 1TB | RAID0, 512K chunk | 32 x 8 MB and 16 x 8 MB | **3200 MB/s** (the sink maximum) | 3/3 each (every sweep step from 1000 MB/s clean) | none (no higher rate exists) | 2823 and 2838 MB/s (fio CPU-bound); 5125 MB/s with hugepage fixed buffers |
 
-The `vck190_fmcp1` rows were measured 2026-10-17 (Sabrent) and 2026-10-18 (980 PRO), the
-`zcu106_hpc0` rows 2026-10-19, all with 10 GB playbacks.
+The `vck190_fmcp1` rows were measured 2026-10-17 (Sabrent; the RAID0 confirmation 2026-10-20)
+and 2026-10-20 (980 PRO), the `zcu106_hpc0` rows 2026-10-20 (Sabrent and 980 PRO),
+all with 10 GB playbacks.
 
 With the Sabrent Rocket 2230 1TB pair (Gen4 x4) one drive alone plays back at the 3.2 GB/s
-sink maximum every time; RAID0 is marginal there (a read stall of a few ms in about one run
-in three at 3000-3200 MB/s). fio without fixed buffers is CPU-bound at ~4.1-4.5 GB/s on this
-board; with hugepage fixed buffers it reads the RAID0 at 7792 MB/s.
+sink maximum every time, and so does RAID0 (20 of 20 runs from 1000 to 3200 MB/s on 2026-10-20,
+single and RAID0; one read stall of a few ms in the 2026-10-17 sweep at 3200 MB/s). fio without
+fixed buffers is CPU-bound at ~4.1-4.5 GB/s on this board; with hugepage fixed buffers it reads
+the RAID0 at 7792 MB/s.
 
-The Samsung 980 PRO 1TB pair (Gen4 x4 on `vck190_fmcp1`) plays back faster there than on
-`zcu106_hpc0`: one drive at 3000 MB/s every time (3200 MB/s in 3 of 4 runs with 32 buffers),
-RAID0 up to the 3.2 GB/s sink maximum, with an isolated read stall (7 000-70 000 underflow ticks)
-in about 3 of 10 RAID0 runs at 2500-3200 MB/s (32 buffers), at any of these rates. fio reads one
-drive at 6312 MB/s and the pair at 7936 MB/s with hugepage fixed buffers.
+The Samsung 980 PRO 1TB pair (Gen4 x4 on `vck190_fmcp1`) plays back at the 3.2 GB/s sink maximum
+from one drive and from RAID0, with 32 or 16 buffers: 80 of 80 runs from 1000 to 3200 MB/s were
+clean on 2026-10-20 (every sweep step, then 3 of 3 runs at 2500, 2750 and 3000 MB/s and 5 of 5
+at 3200 MB/s in each configuration). fio reads one drive at 6309 MB/s and the pair at 7781 MB/s
+with hugepage fixed buffers.
 
-On `zcu106_hpc0` the single 980 PRO 1TB plays back cleanly up to 2250 MB/s. At 2500 and
-2750 MB/s it under-runs in almost every run, although 3000 MB/s was clean in 3 of 5 runs and fio
-reads the same file at 2845-2856 MB/s; see
-[Single-drive playback deficit on zcu106_hpc0](#single-drive-playback-deficit-on-zcu106_hpc0).
-RAID0 reaches 2250 MB/s with 32 buffers (2 of 3) and the 3200 MB/s sink maximum with 16 buffers
-(2 of 3); the failures above that are short read stalls at random rates and times (in 7 of 32
-RAID0 10 GB runs at 2000-3200 MB/s, sweeps included, 1022-231 371 underflow ticks each), not a
-rate limit.
+On `zcu106_hpc0` the 980 PRO 1TB, single or in RAID0, plays back at the 3.2 GB/s sink maximum
+with 32 or 16 buffers: 52 of 52 runs from 1000 to 3200 MB/s were clean (fio reads the same file
+at 2870-2889 MB/s, CPU-bound, and at 3183 MB/s with hugepage fixed buffers). Isolated short read
+stalls remain possible: of 17 further single-drive runs at 2500-3200 MB/s, two showed 2553 and
+14 302 underflow ticks (both at 3000 MB/s; six repeats at 3000 MB/s were clean).
 
-The Sabrent Rocket 2230 1TB on `zcu106_hpc0` plays back at 2250 MB/s from one drive and at 2250
-(32 buffers, 2 of 3) / 2500 MB/s (16 buffers) from RAID0. Above that the failures are short read
-stalls, not a rate limit: every failing sweep step was clean on its recheck, and the single
-drive played 3000 MB/s cleanly once. fio without fixed buffers is CPU-bound on this board
-(2.7-2.9 GB/s, one A53 core at 92-98 %); with hugepage fixed buffers it reads one drive at
-3124 MB/s and the pair at 5138 MB/s.
+The Sabrent Rocket 2230 1TB on `zcu106_hpc0` plays back at 3000 MB/s from one drive (3200 MB/s
+is above what one Gen3 x4 slot reads, ~3.12 GB/s even with fixed buffers, so it underflows
+every time) and at the 3.2 GB/s sink maximum from RAID0, with 32 or 16 buffers: all 52 runs at
+or below those rates were clean. fio without fixed buffers is CPU-bound on this board
+(2.8-3.0 GB/s, one A53 core at 92-98 %); with hugepage fixed buffers it reads one drive at
+3124 MB/s and the pair at 5125 MB/s.
 
 Read fio reference: `fio --name=rd --filename=<the recording> --readonly --rw=read --bs=8M
 --direct=1 --ioengine=io_uring --iodepth=8 --size=10G` on the same filesystem; "hugepage fixed
@@ -466,32 +472,6 @@ Functional checks of `fdplay` (design 1.1, 10 GB test-pattern recordings unless 
 | 256 MB recording resident in the ring (32 x 8 MB, 64 x 4 MB), `--rate 3200MB` | 0 underflows over 31 and 63 buffer boundaries at the full sink rate (the egress FIFO covers the MM2S restart gap at 3.2 GB/s: < 20 µs) |
 | Ctrl-C (SIGINT) after 4 s at 1000 MB/s | exit code 1, 4.0 GB played, egr_discard 809 668-1 042 442 beats (the flushed in-flight buffers), no `Cannot stop channel`; the next playback is complete with 0 underflows |
 | Checker prime wait (driver, at most 100 ms) | never timed out (no `did not prime` message in any playback of the session, about 50) |
-
-#### Single-drive playback deficit on zcu106_hpc0
-
-An open observation (2026-10-19): one Samsung 980 PRO 1TB on `zcu106_hpc0` plays a 10 GB file
-back cleanly at 2250 MB/s and mostly at 3000 MB/s, but almost never at 2500 or 2750 MB/s.
-Underflow ticks per run (10 GB recorded at 1000 MB/s, 32 x 8 MB buffers unless stated; "clean" =
-0):
-
-| runs | 2250 MB/s | 2500 MB/s | 2750 MB/s | 3000 MB/s |
-|---|---|---|---|---|
-| sweeps, 20 s after the recording | clean (6 runs, 32 and 16 buffers) | 16.9 M, recheck 5.05 M; 16 buffers: 18.9 M, recheck clean | | |
-| ~0.5 min after a recording | | 12.9 M | | clean |
-| ~10.5 min after a recording | | 25.7 M | | clean |
-| three interleaved rounds, 0.5-2 min after a recording | clean (3 runs) | 5.16 M, 53 732, 33.6 M | 22.3 M, 25.9 M, 20.9 M | clean, 842 079, 109 811 |
-| 16 buffers, three runs | | 28.6 M, 8.6 M, 37.7 M | | |
-
-2250 MB/s was clean in 9 of 9 runs and 3000 MB/s in 3 of 5, but 2500 MB/s in only 1 of 12 runs
-(0 of 7 with 32 buffers, 1 of 5 with 16) and 2750 MB/s in 0 of 3. Most failures are millions of
-ticks: the 10 GB file took up to ~5 % longer than at the nominal rate, a shortfall over the whole
-file rather than one short stall. It does not depend on the idle time before the playback (0.5 or
-10.5 min) or on the ring size, and three interleaved rounds (2250, 2500, 2750 and 3000 MB/s in
-turn) reproduced it. fio reads the same file at 2845-2856 MB/s (3182 MB/s with hugepage fixed
-buffers). It was not seen with the same drive on `vck190_fmcp1` (3000 MB/s clean in 3 of 3 runs)
-nor with the Sabrent Rocket 2230 1TB on `zcu106_hpc0` (its 2500 MB/s failures were 0.1-0.37 M
-ticks, clean on recheck). The cause is not known. For one 980 PRO 1TB on `zcu106_hpc0`, play back
-at 2250 MB/s or less.
 
 ### CPU load
 
@@ -647,7 +627,7 @@ This section compares the two methods on the same board, SSDs and image.
 
 ### At a glance
 
-All figures in MB/s (10⁶ bytes/s), measured 2026-10-17 to 2026-10-19 (see [Setups](#setups)).
+All figures in MB/s (10⁶ bytes/s), measured 2026-10-17 to 2026-10-20 (see [Setups](#setups)).
 **b** = burst (the write fits inside the drive's SLC write cache), **s** = sustained (the
 recording ran past the cache). Reads have no cache effect. The 32 GB columns are inside the
 cache of these drives (**b**), so the "fdrec sustained" cell also gives the rate that held over
@@ -657,12 +637,12 @@ a recording past the cache.
 |---|---|---|---|---|---|---|---|---|
 | vck190: Sabrent Rocket 2230 1TB (Gen4 x4) | 4186 **b** (fio CPU-bound) | 1906 **b** | 3000 **b** (top step) | 1931 **b** (inside the ~75 GB cache) | 1000 **b**; past the cache (143 GiB): **1000 s** | 4186 (fio CPU-bound) | 3647 | 3000 (top step) |
 | vck190: RAID0 (2x Sabrent Rocket 2230 1TB) | 4352 **b** (fio CPU-bound) | 1711 **b** | 3000 **b** (top step; 16 buffers: 2000) | 2132 **b** (one run) | 2750 **b**; past the cache (240 GiB): **2750 s** | 3958 (fio CPU-bound) | 2689 | 1000 in the first sweep; 3000 (top step) in a repeat, 2 of 3 runs |
-| vck190: Samsung 980 PRO 1TB (Gen4 x4) | 4694 **b** (fio CPU-bound) | 2006 **b** | 3000 **b** (top step) | 2073 **b** (inside the ~115 GB cache) | 3200 **b**; past the cache (240 GiB): **1750 s** | 4352 (fio CPU-bound; 6312 with fixed buffers, 10 GB) | 3678 | 3000 (top step; clean 2 of 3 runs, 32 and 16 buffers) |
-| vck190: RAID0 (2x Samsung 980 PRO 1TB) | 4623 **b** (fio CPU-bound) | 2173 **b** | 3000 **b** (top step; 16 buffers: 3000) | 2117 **b** (one run) | 3200 **b**; past the cache (480 GiB): **2000 s** (2250-3200 dropped a few thousand beats, FIFO overflows) | 4356 (fio CPU-bound; 7936 with fixed buffers, 10 GB) | 3920 | 2500 (16 buffers: 3000, top step) |
-| zcu106: Samsung 980 PRO 1TB (Gen3 x4) | 2956 **b** | 1398 **b** | 3000 **b** (top step; 16 buffers: 3000) | 1491 **b** (inside the ~115 GB cache) | 3000 **b**; past the cache (200 GiB): **1750 s** | 2854 (fio CPU-bound; 3182 with fixed buffers, 10 GB) | 2026 | 2500 (clean 2 of 3; 16 buffers: 2000, 2 of 3; 10 GB: 2250) |
-| zcu106: RAID0 (2x Samsung 980 PRO 1TB) | 3401 **b** (fio CPU-bound) | 1755 **b** | 3000 **b** (top step; 16 buffers: 3000) | 1749 **b** (one run) | 3000 **b**; past the cache (350 GiB): **2500 s** (2750-3200 dropped 846-14 934 beats, FIFO overflows) | 2824 (fio CPU-bound; 5965 with fixed buffers, 10 GB) | 2397 | 1500 (16 buffers: 2750, clean 1 of 3; 10 GB: 2250, 16 buffers 3200) |
-| zcu106: Sabrent Rocket 2230 1TB (Gen3 x4) | 2827 **b** | 1398 **b** | 2000 **b** (16 buffers: 2750) | 1307 **b** (inside the ~72 GB cache) | 2750 **b**; past the cache (200 GiB): **1750 s** | 2879 (fio CPU-bound; 3124 with fixed buffers, 10 GB) | 2208 | 2250 (16 buffers: 2250; 2500 clean 1 of 3) |
-| zcu106: RAID0 (2x Sabrent Rocket 2230 1TB) | 3229 **b** (fio CPU-bound) | 1536 **b** | 3000 **b** (top step; 16 buffers: 1750) | 1527 **b** (one run) | 3200 **b**; past the cache (350 GiB): **2250 s** (2500-3200 dropped 1226-10 150 beats, FIFO overflows) | 2653 (fio CPU-bound; 5138 with fixed buffers, 10 GB) | 2208 | 1750 (16 buffers: 2250; 2500 clean 1 of 3) |
+| vck190: Samsung 980 PRO 1TB (Gen4 x4) | 4694 **b** (fio CPU-bound) | 2006 **b** | 3000 **b** (top step) | 2073 **b** (inside the ~115 GB cache) | 3200 **b**; past the cache (240 GiB): **1750 s** | 4352 (fio CPU-bound; 6309 with fixed buffers, 10 GB) | 3678 | 3000 (top step; 16 buffers: 3000; 10 GB: 3200, the sink maximum) |
+| vck190: RAID0 (2x Samsung 980 PRO 1TB) | 4623 **b** (fio CPU-bound) | 2173 **b** | 3000 **b** (top step; 16 buffers: 3000) | 2117 **b** (one run) | 3200 **b**; past the cache (480 GiB): **3200 s** | 4356 (fio CPU-bound; 7781 with fixed buffers, 10 GB) | 3920 | 3000 (top step; 16 buffers: 3000; 10 GB: 3200, the sink maximum) |
+| zcu106: Samsung 980 PRO 1TB (Gen3 x4) | 2956 **b** | 1398 **b** | 3000 **b** (top step; 16 buffers: 3000) | 1491 **b** (inside the ~115 GB cache) | 3000 **b**; past the cache (200 GiB): **1750 s** | 2854 (fio CPU-bound; 3183 with fixed buffers, 10 GB) | 2026 | 3000 (top step; 16 buffers: 3000; 10 GB: 3200, the sink maximum) |
+| zcu106: RAID0 (2x Samsung 980 PRO 1TB) | 3401 **b** (fio CPU-bound) | 1755 **b** | 3000 **b** (top step; 16 buffers: 3000) | 1749 **b** (one run) | 3200 **b**; past the cache (350 GiB): **2750 s** (3000 clean 1 of 2, 3200 dropped once) | 2824 (fio CPU-bound; 5955 with fixed buffers, 10 GB) | 2397 | 3000 (top step; 16 buffers: 3000; 10 GB: 3200, the sink maximum) |
+| zcu106: Sabrent Rocket 2230 1TB (Gen3 x4) | 2827 **b** | 1398 **b** | 3000 **b** (top step; 16 buffers: 2500) | 1307 **b** (inside the ~72 GB cache) | 2750 **b**; past the cache (200 GiB): **1750 s** | 2879 (fio CPU-bound; 3124 with fixed buffers, 10 GB) | 2208 | 3000 (top step; 16 buffers: 3000; 10 GB: 3000, 3200 exceeds the slot's ~3.12 GB/s read rate) |
+| zcu106: RAID0 (2x Sabrent Rocket 2230 1TB) | 3229 **b** (fio CPU-bound) | 1536 **b** | 3000 **b** (top step; 16 buffers: 1750) | 1527 **b** (one run) | 3200 **b**; past the cache (350 GiB): **3000 and 3200 s** (one run each; 2500 and 2750 dropped once each) | 2653 (fio CPU-bound; 5125 with fixed buffers, 10 GB) | 2208 | 3000 (top step; 16 buffers: 3000; 10 GB: 3200, the sink maximum) |
 
 | target / config | dd write: rate / % of one core / MB/s per % core | fdrec: rate / % of one core / MB/s per % core |
 |---|---|---|
@@ -671,9 +651,9 @@ a recording past the cache.
 | vck190: Samsung 980 PRO 1TB | 2006 / 79 % / 25 | 2983 / 46 % / 64 |
 | vck190: RAID0 (2x Samsung 980 PRO 1TB) | 2173 / 88 % / 25 | 2985 / 48 % / 62 |
 | zcu106 (Cortex-A53, 1.2 GHz): Samsung 980 PRO 1TB | 1398 / 74 % / 19 | 2980 / 68 % / 44 |
-| zcu106: RAID0 (2x Samsung 980 PRO 1TB) | 1755 / 90 % / 20 | 2982 / 74 % / 40 |
-| zcu106: Sabrent Rocket 2230 1TB | 1398 / 67 % / 21 | 1990 / 49 % / 38 |
-| zcu106: RAID0 (2x Sabrent Rocket 2230 1TB) | 1536 / 80 % / 19 | 2980 / 75 % / 37 |
+| zcu106: RAID0 (2x Samsung 980 PRO 1TB) | 1755 / 90 % / 20 | 2982 / 73 % / 41 |
+| zcu106: Sabrent Rocket 2230 1TB | 1398 / 67 % / 21 | 2878 / 71 % / 41 |
+| zcu106: RAID0 (2x Sabrent Rocket 2230 1TB) | 1536 / 80 % / 19 | 2981 / 75 % / 40 |
 
 Selection rule: dd and fio cells are the median of three runs at their own speed (one run where
 marked); `fdrec` / `fdplay` cells are the highest 250 MB/s step that was clean over 4000 MiB (0
@@ -681,12 +661,9 @@ drops / 0 underflows) and, in the CPU table, the rate it achieved; "fdrec sustai
 highest clean step of the 32 GB [fdbench.sh sweep](#sustained-recording-rate). The recorder rows
 used the shipped default of 32 x 8 MB buffers (the 16-buffer result is given where it differs).
 The `fdrec` and `fdplay` sweeps stop at 3000 MB/s, the last 250 MB/s step below the 3.2 GB/s
-generator and sink maximum. On `zcu106_hpc0` several 4 GB cells of the 1 TB drives are decided
-by single rare events (one FIFO overflow or one short read stall: the Sabrent's `fdrec` and
-`fdplay`, the 980 PRO RAID0's `fdplay`), which is why 16 buffers can come out higher than 32;
-one 980 PRO's `fdplay` cell is set by its 2500-2750 MB/s playback deficit (see [Single-drive
-playback deficit on zcu106_hpc0](#single-drive-playback-deficit-on-zcu106_hpc0)). The 32 GB and
-10-40 GB recordings and the 10 GB playbacks are the better guide there.
+generator and sink maximum. On `zcu106_hpc0` the 16-buffer `fdrec` cells of the Sabrent drives
+(2500 single, 1750 RAID0) are decided by single drive write stalls longer than the 128 MB ring;
+the 32 GB and 10-40 GB recordings are the better guide there.
 
 How to read it: the "drive ceiling" columns show what the SSD itself delivered under Linux with
 8 requests in flight. The dd and burst columns are short transfers that a consumer drive absorbs
@@ -708,15 +685,15 @@ sweep step is clean up to the 3.2 GB/s generator maximum, and the drive's post-c
 GB/s) is visible. On `zcu106_hpc0` (Gen4 drives on Gen3 Root Ports) both run at their Gen3 x4
 link's rate inside the cache: the Sabrent writes 2827-2890 MB/s per slot (fio 4 GB) and reads
 2936-3153 MB/s (raw device), the 980 PRO writes 2956-2962 MB/s and reads 2934-3185 MB/s. One
-drive records 32 GB at 2750 MB/s (Sabrent) or 3000 MB/s (980 PRO), RAID0 at 3200 MB/s (Sabrent)
-or 3000 MB/s (980 PRO; 3200 MB/s lost 430 beats to FIFO overflows), and both drives show the
+drive records 32 GB at 2750 MB/s (Sabrent) or 3000 MB/s (980 PRO), RAID0 at 3200 MB/s with
+either pair, and both drives show the
 same cache and post-cache rate as on the VCK190 (Sabrent ~72 GB and ~1.8 GB/s, 980 PRO ~115-120
 GB and ~1.77 GB/s).
 
 ### Method
 
-Measured on `vck190_fmcp1` (Sabrent pair 2026-10-17, 980 PRO pair 2026-10-18) and on
-`zcu106_hpc0` (both pairs 2026-10-19), with the images of [Setups](#setups) (register map 1.1).
+Measured on `vck190_fmcp1` (Sabrent pair 2026-10-17, 980 PRO pair 2026-10-18, its `fdrec` / `fdplay` rows 2026-10-20) and on
+`zcu106_hpc0` (Sabrent pair 2026-10-19 and 2026-10-20, 980 PRO pair 2026-10-19 and 2026-10-20), with the images of [Setups](#setups) (register map 1.1).
 For each pair the second drive alone got only a fio 4 GB check. XFS on a freshly created
 filesystem with 30 s of idle time per configuration and 20 s between runs, RAID0 = both drives
 with 512 KB chunks. Figures are medians of 3 runs, with [min–max], unless noted.
@@ -745,7 +722,7 @@ with 512 KB chunks. Figures are medians of 3 runs, with [min–max], unless note
 VCK190 (XCVC1902, two Cortex-A72 cores at 1.4 GHz, 8 GB DDR4), `vck190_fmcp1` image. The
 Sabrent Rocket 2230 1TB rows (two drives on the M.2 M-key Stack FMC, measured 2026-10-17) and
 the Samsung 980 PRO 1TB rows (the same two drives as on `zcu106_hpc0`, on the FPGA Drive FMC
-Gen4, measured 2026-10-18) linked at **Gen4 x4** (16 GT/s, `LnkSta` of Root Port and SSD).
+Gen4, measured 2026-10-18, the `fdrec` / `fdplay` rows 2026-10-20) linked at **Gen4 x4** (16 GT/s, `LnkSta` of Root Port and SSD).
 "Sabrent" is one Sabrent Rocket 2230 1TB, "980 PRO" one Samsung 980 PRO 1TB. Same method as
 above, with 60 s of idle time after each `mkfs`. `fdrec` / `fdplay` used the shipped default of
 **32 x 8 MB buffers**; 16-buffer runs were added for comparison. The board has **two** cores,
@@ -774,15 +751,16 @@ so the total CPU column is a share of two cores (50 % = one full core); the per-
 | dd (script) | 980 PRO RAID0 | read | 4000 MiB | 3920 [3711–4033] | 0.5 / 25.3 / 13.7 / 6.4 | 77 [72–81] | 51 |
 | dd (dual script) | both 980 PRO drives, two filesystems | write (aggregate) | 2 x 4000 MiB | 3316 [2843–3410] | 0.4 / 68.9 / 1.9 / 25.9 | 137 [101–140] | 24 |
 | dd (dual script) | both 980 PRO drives, two filesystems | read (aggregate) | 2 x 4000 MiB | 5377 [4033–5519] | 0.4 / 44.4 / 4.8 / 41.7 | 87 [68–91] | 62 |
-| `fdrec`, highest clean: 3000, top step (32 buffers) | 980 PRO | record | 4000 MiB | 2983 | 0.0 / 23.8 / 0.0 / 30.4 | 46 [46–47] | 64 |
+| `fdrec`, highest clean: 3000, top step (32 buffers) | 980 PRO | record | 4000 MiB | 2983 | 0.3 / 23.6 / 0.3 / 30.2 | 46 [46–47] | 64 |
 | `fdrec` at 3200 (32 buffers) | 980 PRO | record | 32 GB | 3198 | 0.2 / 24.8 / 0.1 / 28.8 | 48 | 67 |
-| `fdrec` at 3000, top step (16 buffers) | 980 PRO | record | 4000 MiB | 2983 | sys 23.5 | 45 | 66 |
-| `fdrec`, highest clean: 3000, top step (32 buffers) | 980 PRO RAID0 | record | 4000 MiB | 2985 | 0.0 / 25.4 / 0.3 / 30.7 | 48 [48–49] | 62 |
+| `fdrec` at 3000, top step (16 buffers) | 980 PRO | record | 4000 MiB | 2983 | sys 23.4 | 45 | 66 |
+| `fdrec`, highest clean: 3000, top step (32 buffers) | 980 PRO RAID0 | record | 4000 MiB | 2985 | 0.3 / 24.9 / 0.3 / 24.5 | 48 [48–49] | 62 |
 | `fdrec` at 3200 (32 buffers) | 980 PRO RAID0 | record | 32 GB | 3198 | 0.3 / 24.0 / 0.2 / 28.3 | 46 | 70 |
-| `fdrec` at 3000, top step (16 buffers) | 980 PRO RAID0 | record | 4000 MiB | 2985 | sys 24.1 | 47 | 63 |
-| `fdplay`, highest clean: 3000, top step (32 buffers; clean 2 of 3) | 980 PRO | play | 4000 MiB | 2907 | 0.3 / 18.5 / 0.0 / 27.6 | 35 | 84 |
-| `fdplay`, highest clean: 2500 (32 buffers) | 980 PRO RAID0 | play | 4000 MiB | 2440 | 0.3 / 16.5 / 0.0 / 30.1 | 31 | 79 |
-| `fdplay` at 3000, top step (16 buffers) | 980 PRO RAID0 | play | 4000 MiB | 2949 | 0.2 / 18.9 / 0.0 / 26.7 | 36 | 82 |
+| `fdrec` at 3000, top step (16 buffers) | 980 PRO RAID0 | record | 4000 MiB | 2985 | sys 24.2 | 47 | 64 |
+| `fdplay`, highest clean: 3000, top step (32 buffers) | 980 PRO | play | 4000 MiB | 2907 | 0.0 / 13.8 / 0.0 / 21.2 | 27 [26–27] | 110 |
+| `fdplay` at 3000, top step (16 buffers) | 980 PRO | play | 4000 MiB | 2951 | sys 18.4 | 34 | 87 |
+| `fdplay`, highest clean: 3000, top step (32 buffers) | 980 PRO RAID0 | play | 4000 MiB | 2914 | 0.3 / 19.3 / 0.0 / 26.7 | 37 [37–37] | 80 |
+| `fdplay` at 3000, top step (16 buffers) | 980 PRO RAID0 | play | 4000 MiB | 2948 | 0.3 / 18.9 / 0.0 / 27.3 | 35 | 84 |
 
 Notes:
 
@@ -808,11 +786,10 @@ Notes:
   139–159 %). Unlike the Sabrent pair, one `dd` on the 980 PRO RAID0 is not slower than on one
   drive (2173 vs 2006 MB/s).
 * 980 PRO `fdrec`: clean at the 3000 MB/s top step 3/3 with 32 and with 16 buffers on both
-  layouts (high-water mark 1673–2253); 3200 MB/s over 32 GB clean on both. `fdplay`: single
-  3000 in the sweep, one of the two confirmations had 3194 underflow ticks (467 with 16
-  buffers); RAID0 with 32 buffers stopped at 2500 (2750: 30 128 ticks, one read stall), with 16
-  buffers 3000 3/3.
-* At 1000 MB/s: `fdrec` 16 % (980 PRO) and 17 % (980 PRO RAID0) of a core, `fdplay` 13 / 13 %.
+  layouts (high-water mark 1690–2049 of 16384); 3200 MB/s over 32 GB clean on both. `fdplay`:
+  clean at every step up to the 3000 MB/s top step, 3/3, with 32 and with 16 buffers on both
+  layouts (0 underflows in all 56 playbacks, 2026-10-20).
+* At 1000 MB/s: `fdrec` 16 % (980 PRO) and 17 % (980 PRO RAID0) of a core, `fdplay` 11 / 13 %.
   Each 980 PRO got two NVMe I/O queues (one per core).
 
 Variations (dd timed like the scripts):
@@ -861,7 +838,8 @@ drive's first full-drive discard of the day, gave 2794 MB/s.
 ### Results: zcu106_hpc0
 
 AMD ZCU106 (XCZU7EV, four Cortex-A53 cores at 1.2 GHz, 4 GB DDR4), XDMA Gen3 x4 Root Ports,
-`zcu106_hpc0` image, measured 2026-10-19. The Samsung 980 PRO 1TB rows (two drives on the FPGA
+`zcu106_hpc0` image, measured 2026-10-19 (the `fdrec` / `fdplay` rows 2026-10-20). The
+Samsung 980 PRO 1TB rows (two drives on the FPGA
 Drive FMC Gen4 on HPC0) and the Sabrent Rocket 2230 1TB rows (two drives on the M.2 M-key Stack
 FMC on HPC0) are Gen4 drives; they link at Gen3 x4 here (`LnkSta 8GT/s (downgraded)`). Same
 method, with 60 s of idle time after each `mkfs`. `fdrec` / `fdplay` used the shipped default of
@@ -876,54 +854,52 @@ of four cores (25 % = one full core).
 | dd (script) | RAID0 (2x 980 PRO) | read | 4000 MiB | 2397 [2255–2397] | 0.3 / 20.7 / 0.0 / 1.3 | 82 [80–82] | 29 |
 | dd (dual script) | both 980 PRO, two filesystems | write (aggregate) | 2 x 4000 MiB | 2741 [2646–2759] | 0.2 / 35.1 / 0.9 / 10.6 | 145 [133–160] | 19 |
 | dd (dual script) | both 980 PRO, two filesystems | read (aggregate) | 2 x 4000 MiB | 4033 [3600–4052] | 0.3 / 23.8 / 4.6 / 11.4 | 111 [100–128] | 36 |
-| `fdrec`, highest clean: 3000, top step (16: 3000) | 980 PRO 1TB | record | 4000 MiB | 2980 | 0.2 / 17.4 / 0.0 / 10.5 | 68 | 44 |
+| `fdrec`, highest clean: 3000, top step (16: 3000) | 980 PRO 1TB | record | 4000 MiB | 2980 | 0.2 / 17.7 / 0.2 / 10.5 | 68 | 44 |
 | `fdrec` at 3000 | 980 PRO 1TB | record | 32 GB | 2998 | 0.2 / 17.5 / 0.1 / 11.3 | 67 | 44 |
-| `fdrec`, highest clean: 3000, top step (16: 3000) | RAID0 (2x 980 PRO) | record | 4000 MiB | 2982 | 0.2 / 18.1 / 0.5 / 10.9 | 74 | 40 |
+| `fdrec`, highest clean: 3000, top step (16: 3000) | RAID0 (2x 980 PRO) | record | 4000 MiB | 2982 | 0.2 / 18.6 / 0.5 / 10.8 | 73 | 41 |
 | `fdrec` at 3000 | RAID0 (2x 980 PRO) | record | 32 GB | 2998 | 0.2 / 18.6 / 0.3 / 11.5 | 73 | 41 |
-| `fdplay`, highest clean: 2500 (clean 2 of 3; 16: 2000, 2 of 3) | 980 PRO 1TB | play | 4000 MiB | 2376 | 0.0 / 9.1 / 2.2 / 11.2 | 42 | 57 |
-| `fdplay`, highest clean: 1500 (16: 2750, clean 1 of 3; 2500 clean) | RAID0 (2x 980 PRO) | play | 4000 MiB | 1472 | 0.2 / 7.5 / 0.7 / 15.5 | 32 | 46 |
+| `fdplay`, highest clean: 3000, top step (16: 3000) | 980 PRO 1TB | play | 4000 MiB | 2824 | 0.2 / 11.9 / 3.0 / 8.5 | 55 | 51 |
+| `fdplay`, highest clean: 3000, top step (16: 3000) | RAID0 (2x 980 PRO) | play | 4000 MiB | 2894 | 0.2 / 16.5 / 0.2 / 6.8 | 64 | 46 |
 | dd (script) | Sabrent Rocket 2230 1TB | write | 4000 MiB | 1398 [1384–1422] | 0.1 / 17.5 / 0.0 / 6.0 | 67 [67–73] | 21 |
 | dd (script) | Sabrent Rocket 2230 1TB | read | 4000 MiB | 2208 [1864–2280] | 0.1 / 14.2 / 0.0 / 5.4 | 63 [52–77] | 36 |
 | dd (script) | RAID0 (2x Sabrent) | write | 4000 MiB | 1536 [1394–1664] | 0.2 / 19.0 / 1.5 / 3.2 | 80 [75–90] | 19 |
 | dd (script) | RAID0 (2x Sabrent) | read | 4000 MiB | 2208 [2066–2231] | 0.1 / 17.7 / 0.0 / 2.0 | 85 [70–85] | 26 |
 | dd (dual script) | both Sabrent, two filesystems | write (aggregate) | 2 x 4000 MiB | 2565 [2504–2646] | 0.2 / 33.5 / 1.1 / 10.5 | 136 [122–141] | 19 |
 | dd (dual script) | both Sabrent, two filesystems | read (aggregate) | 2 x 4000 MiB | 3663 [3647–4153] | 0.3 / 25.6 / 9.0 / 12.1 | 104 [101–130] | 35 |
-| `fdrec`, highest clean: 2000 (16: 2750) | Sabrent Rocket 2230 1TB | record | 4000 MiB | 1990 | 0.0 / 13.0 / 0.1 / 16.8 | 49 | 38 |
-| `fdrec` at 2750 | Sabrent Rocket 2230 1TB | record | 32 GB | 2748 | 0.1 / 15.0 / 0.2 / 13.2 | 66 | 41 |
-| `fdrec`, highest clean: 3000, top step (16: 1750) | RAID0 (2x Sabrent) | record | 4000 MiB | 2980 | 0.2 / 18.7 / 0.3 / 8.4 | 75 | 37 |
-| `fdrec` at 3200 | RAID0 (2x Sabrent) | record | 32 GB | 3197 | 0.1 / 20.1 / 0.7 / 10.0 | 78 | 41 |
-| `fdplay`, highest clean: 2250 (16: 2250; 2500 clean 1 of 3) | Sabrent Rocket 2230 1TB | play | 4000 MiB | 2148 | 0.0 / 8.9 / 2.5 / 11.5 | 41 | 49 |
-| `fdplay`, highest clean: 1750 (16: 2250; 2500 clean 1 of 3) | RAID0 (2x Sabrent) | play | 4000 MiB | 1696 | 0.0 / 8.2 / 1.2 / 13.6 | 32 | 51 |
+| `fdrec`, highest clean: 3000, top step (16: 2500) | Sabrent Rocket 2230 1TB | record | 4000 MiB | 2878 | 0.2 / 18.5 / 0.0 / 11.0 | 71 | 41 |
+| `fdrec` at 2750 | Sabrent Rocket 2230 1TB | record | 32 GB | 2748 | 0.2 / 14.9 / 0.3 / 13.5 | 65 | 42 |
+| `fdrec`, highest clean: 3000, top step (16: 1750) | RAID0 (2x Sabrent) | record | 4000 MiB | 2981 | 0.2 / 18.9 / 0.5 / 9.0 | 75 | 40 |
+| `fdrec` at 3200 | RAID0 (2x Sabrent) | record | 32 GB | 3197 | 0.2 / 20.0 / 0.8 / 9.9 | 79 | 41 |
+| `fdplay`, highest clean: 3000, top step (16: 3000) | Sabrent Rocket 2230 1TB | play | 4000 MiB | 2822 | 0.2 / 12.2 / 3.8 / 7.4 | 59 | 48 |
+| `fdplay`, highest clean: 3000, top step (16: 3000) | RAID0 (2x Sabrent) | play | 4000 MiB | 2838 | 0.2 / 15.4 / 0.0 / 5.5 | 58 | 49 |
 
 Notes:
 
 * 980 PRO 1TB: raw script output (MiB/s, medians): write 1351, read 1970; RAID0 write 1694,
   read 2325; dual write 2631, read 3883 (aggregate). One `dd` at queue depth 1 is CPU- and
   latency-bound (19-20 MB/s per % of a core writing). Four NVMe I/O queues on both slots.
-* 980 PRO `fdrec` with 32 and with 16 buffers: clean at the 3000 MB/s top step 3/3 on one drive
-  and on RAID0 (high-water mark 2119-3717); 3000 MB/s over 32 GB clean on both (high-water mark
-  3785 and 3054).
-* 980 PRO `fdplay` (sweeps started 20 s after the recording): single 2500 with 32 buffers in
-  2 of 3 (6.23 M ticks once; 2750: 4.87 M), 2000 with 16 buffers in 2 of 3 (19 365 ticks once;
-  2250: 29 345); RAID0 1500 with 32 buffers (1750: 4264 ticks), 2750 with 16 buffers in 1 of 3
-  (2298 and 3677 ticks; 2500 clean). The RAID0 cells are decided by short read stalls, the
-  single-drive ones by the 2500-2750 MB/s deficit (see
-  [Single-drive playback deficit on zcu106_hpc0](#single-drive-playback-deficit-on-zcu106_hpc0));
-  the 10 GB playbacks are the better guide.
+* 980 PRO `fdrec` with 32 and with 16 buffers: clean at every step up to the 3000 MB/s top
+  step, 3/3 there, on one drive and on RAID0 (high-water mark 2172-4565 at 3000 MB/s;
+  2979-2983 MB/s); 3000 MB/s over 32 GB clean on both (high-water mark 2930 and 3853).
+  Recording at 3 GB/s costs 66-73 % of one A53 core.
+* 980 PRO `fdplay` with 32 and with 16 buffers: clean at every step up to the 3000 MB/s top
+  step, 3/3 there, on one drive and on RAID0 (0 underflows in all 56 playbacks). The tool's own
+  rate at that step (2824-2932 MB/s) includes the ring prefill. Playback at 3 GB/s costs
+  55-64 % of a core.
 * At 1000 MB/s: `fdrec` 25 % of a core (980 PRO) and 26 % (RAID0); `fdplay` 17 / 20 %.
 * Sabrent Rocket 2230 1TB: raw script output (MiB/s, medians): write 1346, read 2139; RAID0
   write 1481, read 2162; dual write 2476, read 3539 (aggregate). One `dd` at queue depth 1 is
   CPU- and latency-bound on the A53 (19–21 MB/s per % of a core writing). Four NVMe I/O queues
   on both slots.
-* Sabrent `fdrec` with 32 buffers: 2000 3/3 (high-water mark 1452–2434); 2250 dropped 1154 beats
-  once (one FIFO overflow at a buffer boundary, not bandwidth); with 16 buffers 2750 3/3, 3000
-  drops writing 2851 MB/s (above the drive's write rate). RAID0 with 32 buffers 3000 3/3 (the
-  sweep's top step; high-water mark 2939–3297); with 16 buffers 1750 3/3, 2000 dropped
-  857 232 beats. `fdplay`: single 2250 with 32 buffers (2500: 133 255 ticks), with 16 buffers
-  2250 clean and 2500 clean in 1 of 3; RAID0 1750 with 32 buffers (2000: 5565 ticks), with 16
-  buffers 2250 clean and 2500 clean in 1 of 3. These 4 GB sweeps are decided by single rare
-  events; the 32 GB and 10-40 GB recordings are the better guide.
-* At 1000 MB/s: `fdrec` 26 % of a core (Sabrent) and 27 % (RAID0); `fdplay` 19 / 20 %.
+* Sabrent `fdrec` with 32 buffers: clean at every step up to the 3000 MB/s top step, 3/3 there,
+  on one drive (2867-2895 MB/s, high-water mark 2172-2321) and on RAID0 (2973-2981 MB/s,
+  2260-2395). With 16 buffers one drive was clean to 2500 MB/s (2750 dropped 1 751 020 beats)
+  and RAID0 to 1750 MB/s (2000 dropped 191 277 beats): in both the 128 MB ring ran out behind
+  stalled drive writes (8 writes in flight). `fdplay` with 32 and 16 buffers: clean at every
+  step up to the 3000 MB/s top step, 3/3, on one drive and on RAID0 (0 underflows in all 56
+  playbacks); the tool's own rate there is 2822-2935 MB/s. Recording at 3 GB/s costs 71-75 % of
+  one A53 core, playback 56-60 %.
+* At 1000 MB/s: `fdrec` 26 % of a core (Sabrent) and 27 % (RAID0); `fdplay` 19 / 19 %.
 
 Variations (dd timed like the scripts):
 
@@ -1037,8 +1013,8 @@ cache](#the-slc-cache)). Where nothing else comes first, the post-cache rate set
 single-drive rate: 1750 MB/s for the 980 PRO on both boards (over 240 GiB on the VCK190, over
 200 and 221 GiB on `zcu106_hpc0`; 2000 MB/s drops when the cache ends) and for the Sabrent on
 `zcu106_hpc0` (over 200 GiB; 2000 MB/s drops just past the cache). Elsewhere other limits come
-first: the Sabrent's rare write stalls on `vck190_fmcp1` and late DMA restarts in long RAID0
-recordings (section 5). Smaller drives show the cliff sooner, or not at all: Samsung rates the
+first: the Sabrent's rare write stalls on `vck190_fmcp1` and, in long RAID0 recordings at
+3000 MB/s and above on `zcu106_hpc0`, the rare late DMA restarts (section 5). Smaller drives show the cliff sooner, or not at all: Samsung rates the
 970 EVO 250GB at up to 1500 MB/s sequential write, and 300 MB/s once its TurboWrite (SLC) cache
 is full
 ([data sheet](https://download.semiconductor.samsung.com/resources/data-sheet/Samsung-NVMe-SSD-970-EVO-Data-Sheet_Rev.1.0.pdf)),
@@ -1053,10 +1029,6 @@ with 8 requests in flight fio reads it at 4352 MB/s, CPU-bound, and at 6312 MB/s
 fixed buffers, the way `fdplay` reads. On `zcu106_hpc0` the Gen3 x4 link sets the per-slot read
 rate: a Sabrent Rocket 2230 1TB reads ~2.9-3.15 GB/s and a Samsung 980 PRO 1TB ~2.9-3.2 GB/s
 per slot (raw device, 1 MB requests at queue depth 8 and 32).
-
-**An open read deficit.** One 980 PRO 1TB alone on `zcu106_hpc0` has an unexplained playback
-deficit at 2500-2750 MB/s (see
-[Single-drive playback deficit on zcu106_hpc0](#single-drive-playback-deficit-on-zcu106_hpc0)).
 
 **The recorder's criterion is the drive's worst moment.** A recording passes only if no beat
 is dropped over its whole length, so its rate is set by the drive's slowest stretch
@@ -1110,13 +1082,14 @@ neither is the limit. Inside the SLC cache the limit is the Gen3 x4 link at 128-
 (MaxReadReq 512 bytes): the link carries 3.94 GB/s raw, and each 128-byte payload travels in a
 TLP with ~20-24 bytes of header, sequence number, LCRC and framing, plus acknowledgement and
 flow-control packets, which leaves ~3.1-3.3 GB/s of payload per direction. Measured on
-`zcu106_hpc0` with both 1 TB drives: one slot writes up to ~2.95 GB/s with the Sabrent and ~3.04
+`zcu106_hpc0` with both 1 TB drives: one slot writes up to ~2.93 GB/s with the Sabrent and ~3.04
 GB/s with the 980 PRO (fio 2824-2890 and 2956-2962 MB/s; the 3000-3200 MB/s sweep steps 2949 and
-3037 MB/s) and reads 2936-3153 MB/s (Sabrent) and 2934-3185 MB/s (980 PRO, raw device), against
+3036 MB/s) and reads 2936-3153 MB/s (Sabrent) and 2934-3185 MB/s (980 PRO, raw device), against
 ~4.2-4.7 GB/s in the cache on the VCK190's Gen4 x4 link. So one drive records 2750 MB/s
 (Sabrent) or 3000 MB/s (980 PRO), and RAID0 across both slots is the way past that. Past the
 cache the drive's post-cache rate (~1.8 GB/s Sabrent, ~1.77 GB/s 980 PRO) is the limit, and in
-long RAID0 recordings the rare late DMA restarts at buffer boundaries (section 5). The per-slot
+long RAID0 recordings at 3000 MB/s and above the rare late DMA restarts at buffer boundaries
+(section 5). The per-slot
 figure is consistent with [fpga-drive-nvme-offload](https://offload.fpgadrive.com), the hardware
 NVMe host design (AMD NVMe Host Accelerator) on the same board and Root Ports, which reaches
 ~3.04 GB/s per Gen3 x4 slot.
@@ -1155,19 +1128,27 @@ Two buffers decide whether a short stall costs data, although neither limits thr
   them, so on that drive 1000 MB/s is clean in practice (7 of 7 long recordings), not by
   margin. A larger ring (larger buffers and a larger hugepage pool reserved at boot) was not
   tested.
-* **The 64 KB fabric FIFO** only has to cover the AXI DMA's pause at each buffer boundary
-  (~15 µs, the interrupt latency), which it does up to ~4.4 GB/s
-  (see [the FIFO budget](apps.md#tuning-the-fifo-budget-at-buffer-boundaries)). The pause is
-  occasionally longer. In long RAID0 recordings with the 1 TB pairs, single FIFO overflows
-  lost beats while the ring was nearly empty: on `zcu106_hpc0` the Sabrent Rocket 2230 1TB pair
-  at 2500-3200 MB/s (1226-10 150 beats in 350 GiB; clean at 2250 MB/s; once also 28 925 beats
-  in a 32 GB recording at 1750 MB/s) and the 980 PRO 1TB pair at 2750-3200 MB/s (846-14 934
-  beats in 350 GiB; clean at 2500 MB/s; also 430 beats in a 32 GB recording at 3200 MB/s and
-  1167 in 10 GB at 3000 MB/s), each gap starting 64 KiB (+112 B with the Sabrent, +4208 B with
-  the 980 PRO) after a buffer boundary; on `vck190_fmcp1` the 980 PRO 1TB pair at
-  2250-3200 MB/s (3897-16 643 beats in 480 GiB; clean at 2000 MB/s). The 64 KB FIFO lasts 26 µs
-  at 2.5 GB/s and 20 µs at 3.2 GB/s, so a DMA restart occasionally took longer than that. For
-  long RAID0 recordings this interrupt latency, not the SSDs, is the margin.
+* **The fabric FIFO** must cover the AXI DMA's pause at each buffer boundary, during which
+  the driver's interrupt handler starts the next buffer: about 9 µs at every boundary and
+  15-20 µs in the tail on `zcu106_hpc0` (a trace of the S2MM interrupt over 32 GB RAID0
+  recordings at 3200 MB/s: the handler itself takes 8 µs median, 14 µs max). The 256 KB ingest
+  FIFO (16384 beats) covers 82 µs at 3.2 GB/s and the 64 KB egress FIFO 20 µs (see
+  [the FIFO budget](apps.md#tuning-the-fifo-budget-at-buffer-boundaries)). Rarely the restart
+  is much longer, and then the FIFO overflows while the ring is nearly empty. In 350 GiB RAID0
+  recordings each run has one boundary that stalls longer than all the others: 34-59 µs on
+  `vck190_fmcp1` with the Sabrent pair (high-water marks 6457-11 812 at 2750-3200 MB/s, no
+  drops), 24-44 µs on `vck190_fmcp1` with the 980 PRO pair over 480 GiB (high-water marks
+  4193-8896 at 2750-3200 MB/s, no drops) and 36-46 µs on `zcu106_hpc0` with the 980 PRO pair
+  in the clean runs. On `zcu106_hpc0` the tail is longer: with the 980 PRO pair one run at
+  3000 MB/s and the run at 3200 MB/s hit a boundary of about 240 and 120 µs and lost 29 165 and
+  8085 beats; with the Sabrent pair the 350 GiB runs at 2500 and 2750 MB/s lost 40 425 and
+  20 256 beats (about 364 and 213 µs), a 32 GB run at 2750 MB/s lost 54 968 beats (about
+  415 µs), and the 350 GiB run at 3000 MB/s came within 21 beats of the 16384-beat FIFO. In
+  every case the gap starts 16384 + 7 beats after the boundary and the drives were not involved
+  (at most 8 writes in flight). For long RAID0 recordings at 2500 MB/s and above on the Zynq
+  UltraScale+ targets this restart latency, not the SSDs, is the margin; the handler's 8 µs and the rare long stalls are software, so a design that keeps
+  the DMA armed across buffer boundaries (a descriptor chain, see
+  [Limitations](limitations.md)) would remove them.
 
 Both set what "sustainable" means: a rate is sustainable if the drive's worst stall fits in
 the ring.

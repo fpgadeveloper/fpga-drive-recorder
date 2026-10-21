@@ -865,38 +865,115 @@ def _sha256_file(p: Path):
     return h.hexdigest()
 
 
-def yocto_inputs(ctx: Context):
-    """{repo-relative path: sha256} of everything in the repo the target's Yocto
-    image is built from: the XSA, the bsp dir (conf/local.conf.append,
-    meta-user/, bblayers-extra.txt), the port-config overlay and the extra
-    layers. Content hashes, not mtimes: a git checkout/pull rewrites mtimes of
-    files whose content did not change. Symlinks are followed; __pycache__,
-    *.pyc and .git are skipped (not inputs, and they churn). An ABSENT XSA is
-    left out (see yocto_input_changes)."""
+def _add_input_files(p: Path, root: Path, files):
+    """Add file p, or every file under dir p, to files {stamp key: Path}.
+    Symlinks are followed; __pycache__, *.pyc and .git are skipped (not
+    inputs, and they churn)."""
+    if p.is_file():
+        files.setdefault(_input_key(p, root), p)
+        return
+    if not p.is_dir():
+        return
+    seen = set()
+    for dirpath, dirnames, filenames in os.walk(p, followlinks=True):
+        real = os.path.realpath(dirpath)
+        if real in seen:                # symlink loop
+            dirnames[:] = []
+            continue
+        seen.add(real)
+        dirnames[:] = [n for n in dirnames if n not in ("__pycache__", ".git")]
+        for n in filenames:
+            if n.endswith(".pyc") or n == ".git":
+                continue
+            f = Path(dirpath) / n
+            if f.is_file():             # follows symlinks; drops dangling ones
+                files.setdefault(_input_key(f, root), f)
+
+
+# A SRC_URI assignment in any operator/override form (SRC_URI = / += / :=,
+# SRC_URI:append:<override> = ..., SRC_URI =+ ...), after line continuations
+# are joined.
+_SRC_URI_STMT = re.compile(
+    r"^\s*SRC_URI(?::[\w${}.-]+)*\s*(?:\?\?|[+.?:])?=(.*)$")
+_FILE_URI = re.compile(r"file://([^\s;\"'\\]+)")
+_RECIPE_SUFFIXES = (".bb", ".bbappend", ".inc", ".bbclass", ".conf",
+                    ".append")
+
+
+def yocto_repo_sources(dirs, root: Path):
+    """Repo paths (files or dirs) that the recipes in dirs fetch with
+    file:// from OUTSIDE their own layer -- e.g. 'file://sw/fdrec-driver' and
+    'file://include' with FILESEXTRAPATHS pointing at the repo root. Only
+    literal URIs in SRC_URI assignments count (a URI built from ${VAR}, %s or
+    inline python cannot be resolved without bitbake). A URI that resolves
+    next to the recipe (<recipe dir>/<uri> or <recipe dir>/<subdir>/<uri>:
+    files/, ${PN}/, ${BP}/...) is a layer-local file and already hashed with
+    the layer; otherwise it counts when <repo root>/<uri> exists."""
+    root_real = os.path.realpath(root)
+    out = {}
+    for d in dirs:
+        if not d.is_dir():
+            continue
+        for dirpath, dirnames, filenames in os.walk(d, followlinks=True):
+            dirnames[:] = [n for n in dirnames if n not in ("__pycache__", ".git")]
+            for n in filenames:
+                if not n.endswith(_RECIPE_SUFFIXES):
+                    continue
+                rf = Path(dirpath) / n
+                try:
+                    text = rf.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    continue
+                text = re.sub(r"\\\r?\n", " ", text)
+                rdir = rf.parent
+                for line in text.splitlines():
+                    m = _SRC_URI_STMT.match(line)
+                    if not m:
+                        continue
+                    for uri in _FILE_URI.findall(m.group(1)):
+                        if any(c in uri for c in "${}%*?"):
+                            continue
+                        rel = os.path.normpath(uri)
+                        if os.path.isabs(rel) or rel.split(os.sep)[0] == "..":
+                            continue
+                        if ((rdir / rel).exists()
+                                or any(rdir.glob(f"*/{Path(rel).as_posix()}"))):
+                            continue        # layer-local, hashed with the layer
+                        p = root / rel
+                        real = os.path.realpath(p)
+                        if (p.exists() and (real == root_real or real.startswith(
+                                root_real + os.sep))):
+                            out[_input_key(p, root)] = p
+    return [out[k] for k in sorted(out)]
+
+
+def yocto_input_files(ctx: Context):
+    """{stamp key: Path} of everything in the repo the target's Yocto image is
+    built from: the XSA, the bsp dir (conf/local.conf.append, meta-user/,
+    bblayers-extra.txt), the port-config overlay, the extra layers, and the
+    repo-side sources their recipes fetch with file:// (sw/<driver>,
+    include/, ... -- see yocto_repo_sources). An ABSENT XSA is left out (see
+    yocto_freshness)."""
     root = ctx.repo.root
     bsp = yocto_bsp_dir(ctx)
     cfg = yocto_port_cfg_dir(ctx)
     dirs = [bsp] + ([cfg] if cfg else []) + yocto_extra_layers(bsp, root)
     files = {}
     for d in dirs:
-        if not d.is_dir():
-            continue
-        seen = set()
-        for dirpath, dirnames, filenames in os.walk(d, followlinks=True):
-            real = os.path.realpath(dirpath)
-            if real in seen:            # symlink loop
-                dirnames[:] = []
-                continue
-            seen.add(real)
-            dirnames[:] = [n for n in dirnames if n not in ("__pycache__", ".git")]
-            for n in filenames:
-                if n.endswith(".pyc") or n == ".git":
-                    continue
-                p = Path(dirpath) / n
-                if p.is_file():         # follows symlinks; drops dangling ones
-                    files.setdefault(_input_key(p, root), p)
+        _add_input_files(d, root, files)
+    for p in yocto_repo_sources(dirs, root):
+        _add_input_files(p, root, files)
     if ctx.xsa.is_file():
         files[_input_key(ctx.xsa, root)] = ctx.xsa
+    return {k: files[k] for k in sorted(files)}
+
+
+def yocto_inputs(ctx: Context, files=None):
+    """{stamp key: sha256} of yocto_input_files(). Content hashes, not mtimes:
+    a git checkout/pull rewrites mtimes of files whose content did not
+    change."""
+    if files is None:
+        files = yocto_input_files(ctx)
     return {k: _sha256_file(files[k]) for k in sorted(files)}
 
 
@@ -922,36 +999,114 @@ def read_yocto_stamp(ctx: Context):
     return out
 
 
-def write_yocto_stamp(ctx: Context, inputs):
+def write_yocto_stamp(ctx: Context, inputs, adopted=False):
     p = ctx.yocto_img / YOCTO_STAMP
+    how = ("adopted by build.py for images built without a stamp: not "
+           "hash-verified (see yocto_freshness)" if adopted
+           else "written by build.py")
     try:
         with open(p, "w", encoding="utf-8", newline="\n") as f:
             f.write("# Yocto inputs these images were built from "
-                    "(sha256  path); written by build.py\n")
+                    f"(sha256  path); {how}\n")
             for rel, digest in inputs.items():
                 f.write(f"{digest}  {rel}\n")
     except OSError as e:
         print(f"  WARNING: could not write {rel_to_repo(p, ctx.repo.root)}: {e}")
 
 
-def yocto_input_changes(ctx: Context, stamp, current):
-    """['changed  <path>' | 'added    <path>' | 'removed  <path>', ...] between
-    a stamp and the current inputs. The XSA is compared only when both sides
-    have it: 'clean' of the Vivado project (or a stamp adopted while it was
-    gone) must never by itself force an hours-long Yocto rebuild."""
-    xsa = _input_key(ctx.xsa, ctx.repo.root)
-    if xsa not in stamp or xsa not in current:
-        stamp = {k: v for k, v in stamp.items() if k != xsa}
-        current = {k: v for k, v in current.items() if k != xsa}
-    out = []
-    for k in sorted(set(stamp) | set(current)):
+def yocto_hw_xsa(ctx: Context):
+    """The XSA copy the Yocto build consumed (Yocto/<target>/hw/<xsa>)."""
+    return ctx.repo.root / "Yocto" / ctx.target / "hw" / ctx.xsa.name
+
+
+def _git_clean_tracked(root: Path, keys):
+    """The keys (repo-relative paths) that git tracks in root AND that are
+    unmodified against HEAD (neither staged nor unstaged changes). Empty when
+    git or the repo is unavailable (callers then trust every mtime)."""
+    keys = [k for k in keys if not Path(k).is_absolute()]
+    if not keys:
+        return set()
+
+    def git(*args):
+        r = subprocess.run(["git", "-C", str(root), *args, "--", *keys],
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace")
+        if r.returncode != 0:
+            raise OSError(r.stderr.strip())
+        return {n for n in r.stdout.split("\0") if n}
+    try:
+        tracked = git("ls-files", "-z")
+        modified = git("diff", "--name-only", "--relative", "-z", "HEAD")
+    except (OSError, ValueError):
+        return set()
+    return tracked - modified
+
+
+def yocto_freshness(ctx: Context):
+    """Are the built Yocto images current? Read-only (never writes the stamp).
+
+    Returns (state, lines, current):
+      'missing' -- a product is absent (lines = [], current = None);
+      'fresh'   -- the stamp vouches for every current input;
+      'adopt'   -- nothing contradicts the images, but some inputs (all of
+                   them when there is no stamp yet) are not in the stamp:
+                   lines = 'older    <k>' (mtime before the images) and
+                   'tracked  <k>' (git-tracked, unmodified, mtime after the
+                   images -- see below); recording their hashes is the
+                   decision;
+      'stale'   -- rebuild: lines = 'changed  <k>' / 'removed  <k>' (hash
+                   evidence against the stamp) and 'newer    <k>' (an input
+                   the stamp does not cover, modified after the images).
+    current = {key: sha256} of the current inputs (the stamp to write).
+
+    Rule: the stamp's hashes decide wherever it has an entry. An input it has
+    no entry for (no stamp at all -- images from before the stamp existed;
+    the XSA when the stamp was adopted while it was absent; sources the input
+    set did not cover when the stamp was written) has no hash evidence, so it
+    is judged by mtime against the images' build time = the OLDEST product's
+    mtime (package-output.sh copies with cp -L, so a product's mtime is when
+    it was packaged, after bitbake consumed the inputs): newer -> stale. The
+    mtime is evidence only where git does not rewrite it: the XSA (a build
+    output; for it the Yocto/<t>/hw copy counts too), untracked files and
+    files with uncommitted changes. A git-tracked file that matches HEAD and
+    is newer than the images was rewritten by a checkout/merge/pull (the
+    squash merges of the dev branches post-date the images they shipped),
+    which neither its mtime nor its commit date can tell apart from a real
+    change -- it is adopted ('tracked') and reported, never silently. An
+    absent XSA is never a change by itself ('clean' of the Vivado project
+    must not force an hours-long Yocto rebuild)."""
+    products = yocto_products(ctx)
+    if not all(p.is_file() for p in products):
+        return "missing", [], None
+    built = min(p.stat().st_mtime for p in products)
+    root = ctx.repo.root
+    paths = yocto_input_files(ctx)
+    current = yocto_inputs(ctx, paths)
+    stamp = read_yocto_stamp(ctx)
+    old = dict(stamp or {})
+    xsa = _input_key(ctx.xsa, root)
+    if xsa not in current:
+        old.pop(xsa, None)
+    lines = []
+    for k in sorted(set(old) | set(current)):
         if k not in current:
-            out.append(f"removed  {k}")
-        elif k not in stamp:
-            out.append(f"added    {k}")
-        elif stamp[k] != current[k]:
-            out.append(f"changed  {k}")
-    return out
+            lines.append(f"removed  {k}")
+        elif k in old and old[k] != current[k]:
+            lines.append(f"changed  {k}")
+    unvouched = [k for k in current if k not in old]
+    after = [k for k in unvouched if paths[k].stat().st_mtime > built]
+    clean = _git_clean_tracked(root, [k for k in after if k != xsa])
+    lines += [f"newer    {k}" for k in after if k not in clean]
+    if xsa not in old:
+        hw = yocto_hw_xsa(ctx)
+        if hw.is_file() and hw.stat().st_mtime > built:
+            lines.append(f"newer    {_input_key(hw, root)}")
+    if lines:
+        return "stale", lines, current
+    if stamp is None or unvouched:
+        return "adopt", [f"{'tracked' if k in clean else 'older':<8} {k}"
+                         for k in unvouched], current
+    return "fresh", [], current
 
 
 def petalinux_built(ctx: Context):
@@ -981,28 +1136,48 @@ def stage_yocto(ctx: Context):
     work = ydir / ctx.target
     img = ctx.yocto_img
     products = yocto_products(ctx)
-    if all(p.is_file() for p in products):
-        # Freshness: compare the repo-side inputs with the stamp written when
-        # the images were built. Images built before the stamp existed are
-        # adopted as current -- exactly what the old presence-only test
-        # assumed -- so this never rebuilds an already-built target by itself.
-        current = yocto_inputs(ctx)
-        stamp = read_yocto_stamp(ctx)
-        if stamp is None:
-            write_yocto_stamp(ctx, current)
-            return "skipped (images exist)"
-        changes = yocto_input_changes(ctx, stamp, current)
-        if not changes:
-            xsa = _input_key(ctx.xsa, ctx.repo.root)
-            if xsa in current and xsa not in stamp:
-                write_yocto_stamp(ctx, current)     # adopt the XSA too
-            return "skipped (images up to date)"
+    # Freshness: compare the repo-side inputs with the stamp written when the
+    # images were built; inputs the stamp has no entry for (all of them for
+    # images from before the stamp existed) are judged by mtime against the
+    # images. See yocto_freshness() for the rule.
+    state, lines, current = yocto_freshness(ctx)
+    if state == "fresh":
+        return "skipped (images up to date)"
+    if state == "adopt":
+        tracked = [l for l in lines if l.startswith("tracked")]
+        if read_yocto_stamp(ctx) is None:
+            print(f"  The images have no freshness stamp (built before "
+                  f"build.py recorded one); adopting the current "
+                  f"{len(lines)} inputs as what they were built from.")
+        else:
+            print(f"  Adding {len(lines)} input(s) the stamp did not cover "
+                  f"to the stamp.")
+        if tracked:
+            print(f"  {len(tracked)} of them are git-tracked, unmodified "
+                  f"files with mtimes after the images (a checkout/merge "
+                  f"rewrote them), so their content cannot be checked:")
+            for l in tracked[:10]:
+                print(f"    {l.split(None, 1)[1]}")
+            if len(tracked) > 10:
+                print(f"    ... and {len(tracked) - 10} more")
+            print(f"  If any of them really changed since the images were "
+                  f"built, force a rebuild: {shim_name()} clean --target "
+                  f"{ctx.target} --stage yocto, then {shim_name()} yocto "
+                  f"--target {ctx.target}")
+        else:
+            print("  Every one of them is older than the images.")
+        write_yocto_stamp(ctx, current, adopted=True)
+        return "skipped (images up to date)"
+    if state == "stale":
         print(f"  Yocto inputs changed since the images were built "
-              f"({len(changes)}):")
-        for c in changes[:10]:
+              f"({len(lines)}):")
+        for c in lines[:10]:
             print(f"    {c}")
-        if len(changes) > 10:
-            print(f"    ... and {len(changes) - 10} more")
+        if len(lines) > 10:
+            print(f"    ... and {len(lines) - 10} more")
+        if not (work / "edf-init-build-env").is_file():
+            print("  WARNING: the Yocto workspace is gone (clean --keep-boot?): "
+                  "this is a full fresh build (~5 GB fetch + 40-60 GB).")
         print("  Rebuilding the images (bitbake is incremental).")
     stage_xsa(ctx)
     # Snapshot the inputs now (the XSA exists), not after the build: an edit
@@ -1368,11 +1543,16 @@ def print_status(ctx: Context):
     if ctx.design.get("yocto", False):
         groups.append(("yocto", [ctx.yocto_img / "rootfs.wic.xz"]))
         # Read-only: never adopt/write the stamp from a status call.
-        stamp = read_yocto_stamp(ctx)
-        if (stamp is not None and all(p.is_file() for p in yocto_products(ctx))
-                and yocto_input_changes(ctx, stamp, yocto_inputs(ctx))):
+        state, lines, _ = yocto_freshness(ctx)
+        if state == "stale":
             notes[ctx.yocto_img / "rootfs.wic.xz"] = (
-                f"stale (inputs changed; 'yocto --target {ctx.target}' rebuilds)")
+                f"stale ({len(lines)} input(s) changed; "
+                f"'yocto --target {ctx.target}' rebuilds)")
+        elif state == "adopt" and any(l.startswith("tracked") for l in lines):
+            n = sum(l.startswith("tracked") for l in lines)
+            notes[ctx.yocto_img / "rootfs.wic.xz"] = (
+                f"unverified ({n} git-tracked input(s) rewritten after the "
+                f"images; no stamp to check them against)")
     pkg = []  # bootimage zips -- all produced by the 'package' command
     if ctx.design.get("baremetal", False):
         pkg.append(ctx.bare_zip)
