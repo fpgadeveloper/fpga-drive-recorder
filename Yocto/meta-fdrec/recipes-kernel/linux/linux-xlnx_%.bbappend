@@ -14,3 +14,12 @@ KERNEL_FEATURES:append = " fdrec.cfg"
 # hits this when it stops a channel whose stream source has stalled mid-packet.
 # Applies to every target (generic driver code, no machine override).
 SRC_URI:append = " file://0001-dmaengine-xilinx_dma-poll-with-a-delay-so-the-timeout-is-real-time.patch"
+
+# xilinx_dma: a descriptor submitted while an AXI DMA SG channel runs waits for
+# the completion IRQ, which restarts the engine from hard-IRQ context: a DMA
+# stop at every buffer boundary, rarely 120-415 us long on the ZynqMP, more
+# than the ingest FIFO covers. The patch appends it to the running chain by
+# moving TAILDESC (as the bare-metal xaxidma driver does), so the S2MM/MM2S
+# engines run across buffer boundaries without a software restart.
+# Applies to every target (generic driver code, no machine override).
+SRC_URI:append = " file://0002-dmaengine-xilinx_dma-append-descriptors-to-a-running-SG-chain.patch"

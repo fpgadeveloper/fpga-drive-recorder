@@ -30,7 +30,7 @@ Ports they link at **Gen4 x4** (16 GT/s, `LnkSta` of both the Root Port and the 
 Zynq UltraScale+ Root Ports both link at Gen3 x4 (`lspci`:
 `Speed 8GT/s (downgraded), Width x4`), as expected. The 970 EVO and 950 PRO are Gen3 drives and
 link at Gen3 x4 on every target. On the Zynq UltraScale+ targets a fast Gen4 drive runs at the
-Gen3 x4 link's rate inside its cache: ~2.95-3.04 GB/s writing and ~2.9-3.2 GB/s reading per
+Gen3 x4 link's rate inside its cache: ~2.94-3.04 GB/s writing and ~2.9-3.2 GB/s reading per
 slot, measured with both 1 TB drives on `zcu106_hpc0`.
 
 **NVMe I/O queues.** On every board tested, the Linux NVMe driver set the 970 EVO 250GB up with
@@ -59,15 +59,16 @@ or beats are dropped. The rate printed on an SSD's datasheet is usually not that
 
   | SSD | cache | write rate after the cache |
   |---|---|---|
-  | Samsung 970 EVO 250GB | about 14 GB | about 330 MB/s |
-  | Samsung 950 PRO 256GB | no comparable cliff | about 955 MB/s throughout |
-  | Sabrent Rocket 2230 1TB | about 75 GB (about 140 GB for a RAID0 pair), at ~4.5 GB/s, on `vck190_fmcp1`; about 72 GB at ~2.9 GB/s (the Gen3 x4 link's rate) on `zcu106_hpc0` | a flat ~1.8 GB/s on both boards (~3.6 GB/s for the pair) |
-  | Samsung 980 PRO 1TB | about 115-120 GB (about 230-250 GB for a RAID0 pair), at ~4.7 GB/s on `vck190_fmcp1` (the fio limit there) and ~3.0 GB/s on `zcu106_hpc0` (the Gen3 x4 link's rate) | a flat ~1.77 GB/s per drive on both boards (~3.47 GB/s for the pair on `vck190_fmcp1`) |
+  | Sabrent Rocket 2230 1TB | about 70-75 GB on `vck190_fmcp1` at ~4.5 GB/s and ~69-70 GB on `zcu106_hpc0` at ~2.9 GB/s (the Gen3 x4 link's rate); about 136-143 GB for a RAID0 pair on `vck190_fmcp1` | a flat ~1.8 GB/s on both boards (~3.6 GB/s for the pair on `vck190_fmcp1`) |
+  | Samsung 980 PRO 1TB | about 115-125 GB on both boards, at ~4.7 GB/s or more on `vck190_fmcp1` and ~3.0 GB/s on `zcu106_hpc0` (the Gen3 x4 link's rate); about 245-250 GB for a RAID0 pair | a flat ~1.77 GB/s per drive on both boards (~3.46 GB/s for the pair on `vck190_fmcp1`; ~3.3 GB/s on `zcu106_hpc0`, partly limited by fio) |
+
+  On smaller drives the cliff can be steep: Samsung rates the 970 EVO 250GB at 300 MB/s once
+  its TurboWrite cache is full.
 
 * **Size your test to your recordings.** A short test (a few GB, such as the `dd` speed
   tests) measures the cache. Use `fdbench.sh` with a recording size at least as long as
   your longest recording (default 32 GB per step) to find the rate you can sustain. 32 GB
-  runs past the cache of the 250 GB drives above, but stays inside the cache of the 1 TB
+  runs past the cache of many smaller drives, but stays inside the cache of the 1 TB
   drives: there it gives an in-cache rate. To find a rate that holds past the cache,
   confirm it with one recording of about twice the cache (`fdrec --size`), after
   `fstrim` and a few minutes of idle.
@@ -75,17 +76,16 @@ or beats are dropped. The rate printed on an SSD's datasheet is usually not that
   the in-cache rate applies, but only when the cache is empty at the start: it empties while
   the drive is idle, at a rate that was not measured, so do not count on it between
   back-to-back recordings. If they are longer, the post-cache rate applies. On the 1 TB drives
-  measured here it limited the recorder three times, each time at 1750 MB/s, the post-cache rate
-  (~1.77-1.8 GB/s) rounded down to a 250 MB/s step: one Samsung 980 PRO 1TB over 240 GiB on
-  `vck190_fmcp1` and over 200 GiB (and 221 GiB) on `zcu106_hpc0` (2000 MB/s dropped when the
-  cache ended), and one Sabrent Rocket 2230 1TB on `zcu106_hpc0` over 200 GiB (2000 MB/s dropped
-  just past its ~72 GB cache). On `vck190_fmcp1` another limit came first for the Sabrent: one
-  drive recorded 1000 MB/s over 143 GiB (its limit is a rare ~0.65 s write stall, not
-  bandwidth). RAID0 pairs held 3200 MB/s, the generator maximum, over 350 GiB (Sabrent) and
-  480 GiB (980 PRO) on `vck190_fmcp1`, and on `zcu106_hpc0` 2750 MB/s over 350 GiB (980 PRO)
-  and 3000 and 3200 MB/s over 350 GiB (Sabrent), one run each; single runs at other rates on
-  `zcu106_hpc0` lost one chunk of 8000-55 000 beats to a late DMA restart (host interrupt
-  latency), not to the drives.
+  measured here it limited one drive to 1750 MB/s, the post-cache rate (~1.77-1.8 GB/s)
+  rounded down to a 250 MB/s step, for both drives on both boards: one Sabrent Rocket 2230 1TB
+  over 143 GiB and 200 GiB on `vck190_fmcp1` and over 200 GiB on `zcu106_hpc0`, one Samsung
+  980 PRO 1TB over 219 GiB and 240 GiB on `vck190_fmcp1` and over 200 GiB and 222 GiB on
+  `zcu106_hpc0` (in every case 2000 MB/s dropped just past the cache). RAID0
+  pairs held 3200 MB/s, the generator maximum, on both boards with both drives: over 350 GiB
+  (the Sabrent pair on both boards, the 980 PRO pair on `zcu106_hpc0`) and over 480 GiB (the
+  980 PRO pair on `vck190_fmcp1`). Inside the cache, on the Gen3 x4 slots of `zcu106_hpc0`, one
+  980 PRO records 3000 MB/s and one Sabrent 2750 MB/s; at 3000 MB/s the Sabrent falls behind
+  (all writes of its queue in flight, ~2.94 GB/s on the Gen3 x4 link).
   See [Benchmarks](benchmarks.md#long-recordings-past-the-slc-cache).
 * **Free space and trim.** An SSD with little free space, or one that has not been trimmed,
   has less room for its cache and for garbage collection. Keep the recording filesystem
@@ -94,15 +94,14 @@ or beats are dropped. The rate printed on an SSD's datasheet is usually not that
 * **RAID0.** Two SSDs striped as RAID0 add up their rates, but every chunk of the stripe
   goes to both drives in turn, so the array is limited by the slower drive: twice the
   slower drive's sustained rate. Use two identical SSDs. On `zcu106_hpc0` RAID0 is also the
-  way past the ~2.95-3.04 GB/s that one Gen3 x4 slot writes: two Sabrent Rocket 2230 1TB record
-  32 GB and 40 GB, two Samsung 980 PRO 1TB 40 GB, at the generator's 3200 MB/s (see
+  way past the ~2.94-3.04 GB/s that one Gen3 x4 slot writes: either pair records 10 GB, 32 GB,
+  40 GB and 350 GiB at the generator's 3200 MB/s (see
   [Benchmarks](benchmarks.md#burst-and-40-gb-recordings)).
 * **Heat.** Long recordings at high rates heat the SSD controller, and many SSDs throttle
   when they get hot. Give the SSDs airflow, or a heatsink, for long recordings, and check
   the temperature with `nvme smart-log`. With a fan on the cards, the Sabrent Rocket 2230 1TB
-  reached at most 60 °C on `vck190_fmcp1` and 67 °C on `zcu106_hpc0`, and the 980 PRO 1TB 49 °C
-  on `vck190_fmcp1` and 52 °C on `zcu106_hpc0` (composite), in 300-500 GiB writes, with no
-  throttling.
+  reached at most 66 °C and the 980 PRO 1TB 52 °C (composite, both on `zcu106_hpc0`; 61 °C and
+  50 °C on `vck190_fmcp1`), in 300-500 GiB writes, with no throttling.
 
 Drives designed for sustained writes (SLC or MLC flash, enterprise and industrial drives,
 or simply larger capacities with a bigger cache) give higher sustained rates.

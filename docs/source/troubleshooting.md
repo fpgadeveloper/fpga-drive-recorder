@@ -78,15 +78,15 @@ the SSD writes were not completing fast enough. In order of likelihood:
 
 1. **The rate is above what the SSDs sustain.** Find the sustained rate with `fdbench.sh`
    (32 GB per step) and record below it. A rate that works for 10 GB may fail for longer
-   recordings. On a drive with a large cache (72-120 GB on the 1 TB drives in
+   recordings. On a drive with a large cache (70-125 GB on the 1 TB drives in
    [Benchmarks](benchmarks.md#long-recordings-past-the-slc-cache)), 32 GB stays inside the
    cache: confirm the rate with one recording longer than the cache. On the Zynq UltraScale+
-   targets one SSD slot writes at most ~2.95-3.04 GB/s (the Gen3 x4 link), even inside the
+   targets one SSD slot writes at most ~2.94-3.04 GB/s (the Gen3 x4 link), even inside the
    cache: record above 3000 MB/s (with some drives, 3000 MB/s itself) with RAID0 (see
    [Where the bottlenecks are](benchmarks.md#where-the-bottlenecks-are)).
 2. **The SLC cache ran out.** If the drops start after a fixed amount of data (on the
-   970 EVO 250GB, ~14 GB; the Sabrent Rocket 2230 1TB ~72-75 GB; the Samsung 980 PRO 1TB
-   ~115-120 GB), the SSD's write cache filled up; see
+   Sabrent Rocket 2230 1TB ~70-75 GB, on the Samsung 980 PRO 1TB ~115-125 GB), the SSD's
+   write cache filled up; see
    [Benchmarks](benchmarks.md#the-slc-cache). Use a lower rate, a larger or faster SSD, or
    RAID0.
 3. **`fstrim` just before the recording.** If the drops are near the start of the file,
@@ -94,21 +94,25 @@ the SSD writes were not completing fast enough. In order of likelihood:
    it) before recording; see [Benchmarks](benchmarks.md#the-fstrim-finding-and-the-ring-size).
 4. **The ring is too small for the SSD's write stalls.** More buffers (`--buffers 48`,
    `--buffers 64`) or larger buffers absorb longer stalls, within the hugepage pool. A single
-   gap in an otherwise clean long recording, at no fixed offset, is such a stall: the Sabrent
-   Rocket 2230 1TB occasionally stopped completing writes for ~0.65 s, longer than the default
-   256 MB ring lasts above ~400 MB/s, and the largest ring of 8 MB buffers (64 x 8 MB =
-   512 MB) above ~790 MB/s.
+   gap in an otherwise clean long recording, at no fixed offset, is such a stall: the default
+   256 MB ring lasts 128 ms at 2 GB/s, the largest ring of 8 MB buffers (64 x 8 MB = 512 MB)
+   256 ms. On the Sabrent Rocket 2230 1TB, 16 x 8 MB (128 MB) was too few for some write
+   stalls at 2250-3000 MB/s, and one 2000 MB/s recording had one such gap with the default
+   ring.
 5. **The rate exceeds the FIFO budget.** If `fdrec` warns that "the ingest FIFO covers only
    ... of the DMA restart gap", the rate is too high for the design's FIFO, whatever the
    SSD; see [Applications](apps.md#tuning-the-fifo-budget-at-buffer-boundaries). Without a
-   warning, a drop of a few thousand beats whose gap starts one ingest FIFO depth plus 7 beats
-   after an 8 MiB buffer boundary (262 256 bytes with the 16384-beat FIFO of the reference
-   design) is one late DMA restart. First check that the AXI DMA interrupts are not on CPU0
-   (`dmesg | grep dma-channel`, `/proc/interrupts`; the `dma_irq_cpu` module parameter). With
-   them pinned this happened once in a few hundred GB in 350 GiB RAID0 recordings at 3000 and
-   3200 MB/s on `zcu106_hpc0` with the 980 PRO pair (2750 MB/s clean), and not at all on
-   `vck190_fmcp1` up to 3200 MB/s (see
-   [Benchmarks](benchmarks.md#5-latency-budgets-not-bandwidth)).
+   warning, a drop whose gap starts one ingest FIFO depth plus 7 beats after an 8 MiB buffer
+   boundary (262 256 bytes with the 16384-beat FIFO of the reference design) means the DMA
+   stopped at that boundary for longer than the FIFO lasts. With the image of this repository
+   the DMA does not wait for software at a boundary (driver 1.2 and its `xilinx_dma` patch,
+   see [Kernel driver](driver.md)); it stops there only when no free buffer is queued. Such a
+   gap therefore normally means that the ring ran out behind the SSD: `fdrec --stats` then
+   shows `inflight` at the queue depth and a write rate below the recording rate (items 1
+   and 4). If the SSD keeps up, check that the module is that version
+   (`modinfo -F version fdrec`), that the kernel was built with the `meta-fdrec` layer, and
+   that the AXI DMA interrupts are not on CPU0 (`dmesg | grep dma-channel`,
+   `/proc/interrupts`; the `dma_irq_cpu` module parameter), since they recycle the buffers.
 6. **Other I/O on the same SSDs**, a nearly full filesystem, or a filesystem other than XFS
    or ext4.
 

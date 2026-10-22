@@ -38,15 +38,16 @@ User space owns the memory and the driver pins it:
    `dma_map_sgtable(..., DMA_FROM_DEVICE)` against the DMA channel's device.
 3. `FDREC_IOC_START` resets the datapath (`GLOBAL_CTRL.SOFT_RST`: FIFO flushed, counters
    cleared), sets `PKT_LEN = buffer_size / 16`, puts every buffer in the driver's DMA queue
-   and submits the first two as `dmaengine_prep_slave_sg` descriptors with a completion
-   callback (one active, one pending; each completion submits the next queued buffer, see
-   below), then enables the packetizer and (optionally) the test pattern generator.
+   and submits the first three as `dmaengine_prep_slave_sg` descriptors with a completion
+   callback (the first starts the DMA, the other two are appended to its descriptor chain;
+   each completion appends the next queued buffer, see below), then enables the packetizer
+   and (optionally) the test pattern generator.
 4. `FDREC_IOC_WAIT_FILLED` blocks until a buffer is complete and returns its index and byte
    count. Before it returns, the driver calls `dma_sync_sgtable_for_cpu(DMA_FROM_DEVICE)`.
 5. `FDREC_IOC_RELEASE` gives a buffer back once the app has written it to disk. The driver
    calls `dma_sync_sgtable_for_device(DMA_FROM_DEVICE)` and puts it back in the DMA queue.
 6. `FDREC_IOC_STOP` reads the final counters, lets the buffers the DMA still owns fill up
-   (at most two; with the test pattern generator it runs at full rate meanwhile, so this
+   (at most three; with the test pattern generator it runs at full rate meanwhile, so this
    takes a few ms; their data is discarded), then disables the packetizer, stops the DMA
    (`dmaengine_terminate_sync`) and returns the counters.
 7. Closing the file stops everything, unmaps and unpins the buffers and resets the hardware.
@@ -104,7 +105,7 @@ by the CPU.
    `dma_sync_sgtable_for_device(DMA_TO_DEVICE)` and queues the buffer as one
    `dmaengine_prep_slave_sg(DMA_MEM_TO_DEV)` descriptor (a shortened copy of the
    scatterlist when `bytes` is less than the buffer size). Buffers are played in submission
-   order, with the same **one active + one pending** feed as for recording. Each buffer is
+   order, with the same **three-deep descriptor chain** as for recording. Each buffer is
    one AXI-Stream packet: `xilinx_dma` sets SOP on its first and EOP (TLAST) on its last
    buffer descriptor.
 4. `FDREC_IOC_PLAY_WAIT_DONE` returns the next buffer the DMA has finished reading; the app
@@ -113,7 +114,7 @@ by the CPU.
    sink.
 5. `FDREC_IOC_PLAY_STOP` returns the counters, stops feeding, sets `EGR_CTRL.FLUSH` if the
    DMA still owns buffers (the egress FIFO then accepts and discards everything, so the at
-   most two in-flight descriptors complete within microseconds whatever the sink does),
+   most three in-flight descriptors complete within microseconds whatever the sink does),
    terminates the idle channel, clears `FLUSH`, renews the channel (descriptor ring, see
    below) and disables a checker that `PLAY_START` enabled (its counters keep their values).
    At the end of a complete playback the DMA is already idle and nothing is discarded.
@@ -152,7 +153,7 @@ written by the NVMe controller (the app's `O_DIRECT` read: the NVMe driver maps 
 | Capabilities | `fdrec_info.caps`: `FDREC_CAP_TPG`, `FDREC_CAP_S2MM`; `FDREC_CAP_MM2S` when the `"tx"` channel exists; `FDREC_CAP_CHECK` when `VERSION` ≥ 1.1 (checker and egress registers) |
 | Buffers | 2 to 64 per open file; size a multiple of 2 MB, at most 62 MB (`PKT_LEN` ≤ 2^22 - 1 beats); each buffer 2 MB aligned |
 | DMA descriptors | all registered buffers together may need at most 511 AXI DMA buffer descriptors (one per physically contiguous run of up to 64 MB - 1; the default 32 × 8 MB of hugepages needs at most 128) |
-| Module parameters | `stop_drain_ms` (default 5000, writable at `/sys/module/fdrec/parameters/stop_drain_ms`): the longest time `STOP` / `PLAY_STOP` waits for the buffers the DMA still owns to complete before it terminates the channel anyway (see below). `dma_irq_cpu` (default -1): the CPU the AXI DMA channel interrupts are pinned to at probe: -1 = the last online CPU, -2 = leave the affinity alone, ≥ 0 = that CPU (see the restart gap, below) |
+| Module parameters | `stop_drain_ms` (default 5000, writable at `/sys/module/fdrec/parameters/stop_drain_ms`): the longest time `STOP` / `PLAY_STOP` waits for the buffers the DMA still owns to complete before it terminates the channel anyway (see below). `dma_irq_cpu` (default -1): the CPU the AXI DMA channel interrupts are pinned to at probe: -1 = the last online CPU, -2 = leave the affinity alone, ≥ 0 = that CPU (see "Interrupt CPU", below) |
 | Kernel log at probe | `fdrec <addr>.fdrec_core: /dev/fdrec0: fdrec_core v1.1, src_clk … Hz, dp_clk … Hz, FIFO 16384 beats, DMA rx dma0chan1 tx dma0chan0 (max segment 67108863 bytes), checker`, preceded by one `dma-channel: IRQ <n> -> CPU<c>` line per AXI DMA channel (`dma_irq_cpu`); without a `"tx"` channel: `no DMA channel "tx" (…): record only` |
 | Addressing | the buffers must be directly addressable by the AXI DMA (no swiotlb bouncing): the driver refuses a buffer whose DMA address differs from its physical address. The design's AXI DMA uses 64-bit addressing, so all of PS DDR is reachable |
 
@@ -255,20 +256,33 @@ cat /sys/class/misc/fdrec0/{drop_count,fifo_hwm,fifo_depth}
 The driver uses the generic dmaengine API only. A few properties of the AMD `xilinx_dma`
 driver shape how it does that:
 
-* **Batching and interrupt coalescing.** `xilinx_dma` starts pending descriptors only when
-  the channel is idle (from its interrupt handler), all of them in one go, and programs the
-  AXI DMA's interrupt threshold to their number; the AXI DMA counts completed packets
-  (descriptors with end-of-frame) against it. Handing it every free buffer makes the channel
-  run in batches: one interrupt per batch, no buffer visible to user space until the whole
-  batch is full (the SSD idles meanwhile and then gets a burst), and a DMA restart gap at
-  every batch tail, which costs dropped beats at rates the SSD sustains easily. The driver
-  therefore keeps
-  exactly **one active and one pending descriptor** in `xilinx_dma` (`FDREC_DMA_DEPTH`): when
-  the active buffer completes, the interrupt handler starts the pending one straight away
-  (threshold 1, the DMA pauses only for the interrupt latency, which the ingest FIFO
-  absorbs), and the completion callback submits the next buffer from the driver's queue as
-  the new pending one. Every buffer reaches user space as soon as it is full: one interrupt
-  per buffer.
+* **A descriptor chain that runs across buffer boundaries.** The stock `xilinx_dma` starts
+  pending descriptors only when the channel is idle, from its interrupt handler, all of them
+  in one go, with the AXI DMA's interrupt threshold set to their number (the AXI DMA counts
+  completed packets against it). A descriptor issued while the channel runs waits for that
+  interrupt, so the DMA would stop at the end of every buffer until the handler restarts it.
+  `meta-fdrec` therefore patches `xilinx_dma`
+  (`0002-dmaengine-xilinx_dma-append-descriptors-to-a-running-SG-chain.patch`): a descriptor issued while an
+  AXI DMA scatter-gather channel runs is appended to the running chain in hardware, by
+  writing its last buffer descriptor (BD) to `TAILDESC`. The SG engine compares every BD it
+  completes with `TAILDESC` and follows the BD next-pointers until it reaches it, so a later
+  tail keeps it going; if it has already stopped at the old tail (`DMASR.Idle` with
+  `DMACR.RS` still set), the write resumes it at the old tail's next-pointer. `CURDESC`, the
+  run bit and the interrupt settings are not touched. This is how AMD's bare-metal AXI DMA
+  driver works (`XAxiDma_BdRingToHw`). The interrupt handler only retires completed
+  descriptors: it treats the channel as idle only when no descriptor is left in flight, and
+  only an idle channel is started the stock way (`CURDESC`, run, `TAILDESC`).
+
+  The driver keeps **three descriptors** in `xilinx_dma` (`FDREC_DMA_DEPTH`): the buffer
+  being filled and two behind it in the hardware chain. It submits and issues them one at a
+  time, so the first one starts the idle channel with interrupt threshold 1 and the others
+  are appended: one interrupt per buffer, and every buffer reaches user space as soon as it
+  is full. The completion callback submits the next buffer from the driver's queue, which is
+  appended behind the other two; it has two buffer periods (5.2 ms at 3.2 GB/s with 8 MiB
+  buffers) to do so before the engine reaches the end of the chain. (Handing `xilinx_dma`
+  every free buffer at once would start them as one batch: one interrupt per batch, no
+  buffer visible to user space until the whole batch is full, and the patch appends only
+  while the threshold is 1.)
 * **The S2MM channel cannot halt mid-packet.** With the packetizer gated in the middle of a
   buffer the AXI DMA keeps waiting for the rest of the packet and never reports `Halted`;
   `xilinx_dma_terminate_all` busy-polls for it with `readl_poll_timeout_atomic(..., 0,
@@ -284,7 +298,13 @@ driver shape how it does that:
   `dmaengine_terminate_sync` frees descriptors list by list, which leaves the free list out
   of ring order. The driver therefore releases and re-requests the channel after every
   `STOP`, which rebuilds the ring. The MM2S channel uses the same descriptor code, so it gets
-  the same treatment after every `PLAY_STOP`.
+  the same treatment after every `PLAY_STOP`. The ring order matters for the append as well:
+  the patched `xilinx_dma` appends a descriptor only if the running tail's hardware
+  next-pointer is the new descriptor's first BD, which holds as long as BDs are allocated
+  and freed in ring order (one descriptor per buffer, completed in order, as here).
+  Otherwise it falls back, silently, to the stock behaviour: the descriptor waits for the
+  completion interrupt and the DMA pauses at that boundary for the interrupt latency. The
+  fdrec driver cannot see which path `xilinx_dma` took.
 * **A terminate resets both channels.** On the AXI DMA, `xilinx_dma_terminate_all` ends in a
   channel reset, and `DMACR.Reset` resets the whole core: the *other* channel loses its
   interrupt enables too, and `xilinx_dma` re-enables only those of the channel it reset.
@@ -294,8 +314,8 @@ driver shape how it does that:
   after every `STOP` / `PLAY_STOP` the driver renews **both** channels (only one direction
   runs at a time, so the other one is idle).
 * **MM2S.** The playback channel goes through the same `prep_slave_sg` / start / IRQ code as
-  S2MM, so the batching and coalescing behaviour is identical and the driver keeps one
-  active + one pending descriptor there as well. `prep_slave_sg` marks a `DMA_MEM_TO_DEV`
+  S2MM, so the chaining and coalescing behaviour is identical and the driver keeps three
+  descriptors in the chain there as well. `prep_slave_sg` marks a `DMA_MEM_TO_DEV`
   descriptor SOP on its first and EOP on its last BD, so a buffer of several hugepages
   (several BDs) is **one** packet with TLAST only on its last beat. Halting uses the same
   `stop_transfer` poll (`DMACR.RS = 0`, wait for `DMASR.Halted`). An MM2S channel can only
@@ -304,30 +324,23 @@ driver shape how it does that:
   in-flight descriptors into the egress FIFO's discard path (`EGR_CTRL.FLUSH`) before it
   terminates an idle channel. (The halt-mid-packet behaviour was observed on S2MM on the
   bench; for MM2S the flush makes the driver independent of it.)
-* **Restart gap.** Because the pending descriptor is started from the interrupt handler, the
-  DMA pauses at every buffer boundary for the interrupt latency plus the restart. Measured on
-  `zcu106_hpc0` (ftrace of the S2MM interrupt over 32 GB RAID0 recordings at 3200 MB/s): the
-  handler itself takes 8 µs (median; 14 µs max: AXI-Lite register accesses and uncached
-  descriptor-status reads, not the number of descriptors), and the stall seen by the ingest
-  FIFO is ~9 µs at every boundary (median high-water mark ~1800 beats), with a tail of
-  15-20 µs when the interrupt is delivered late. Rarely it is much longer: over 350 GiB RAID0
-  recordings at 3000-3200 MB/s one boundary took 120-240 µs (`zcu106_hpc0`) and 34-59 µs
-  (`vck190_fmcp1`), untraced. The ingest FIFO (recording) and the egress
-  FIFO (playback) must cover it at the stream rate; see
-  [the FIFO budget](apps.md#tuning-the-fifo-budget-at-buffer-boundaries). A chain of
-  descriptors that keeps the channel armed across buffer boundaries, with no software in that
-  path, would remove the gap; it is a planned follow-up.
+* **Buffer boundaries.** With the chain, no software sits in the path from one buffer to the
+  next: at a boundary the AXI DMA writes the status of the finished BD and fetches the next
+  one by itself, and the ingest FIFO (recording) and the egress FIFO (playback) only bridge
+  that and short DDR back-pressure. The interrupt latency matters only for recycling: a
+  completion that is handled later than two buffer periods lets the chain run out, and the
+  DMA then waits as if no buffer were free. In the fallback case above (ring out of order)
+  the DMA pauses at the boundary for the interrupt latency plus the restart, about 9 µs with
+  a tail of 15-20 µs on `zcu106_hpc0` and rarely hundreds of µs; see
+  [the FIFO budget](apps.md#tuning-the-fifo-budget-at-buffer-boundaries).
 * **Interrupt CPU (`dma_irq_cpu`).** On Zynq UltraScale+ every NVMe completion interrupt of a
   PL PCIe root port (the XDMA bridge's MSI controller is a chained interrupt handler) is
   handled on CPU0, whatever affinity the NVMe queues show, in hard-IRQ bursts of up to
   ~0.8 ms: one 8 MiB read completes as 16 × 512 KB commands, each invalidating its pages,
   because the PCIe path is not cache coherent. An AXI DMA interrupt on CPU0 waits behind
-  them. In playback the SSD read issued after each DMA completion takes about one buffer
-  period at 2500 MB/s, so its completion burst lands just before the next buffer boundary
-  and delays the MM2S restart by ~0.2 ms, far more than the egress FIFO bridges (one
-  980 PRO on `zcu106_hpc0`: 0 of 5 runs clean at 2500 MB/s with the MM2S interrupt on CPU0,
-  5 of 5 on CPU3). The driver therefore pins both AXI DMA channel interrupts at probe to the
-  last online CPU (module parameter `dma_irq_cpu`; `/proc/interrupts` shows them counting
+  them. The interrupt no longer restarts the DMA, but it drives the buffer recycling (and
+  the restart in the fallback case), so the driver pins both AXI DMA channel interrupts at
+  probe to the last online CPU (module parameter `dma_irq_cpu`; `/proc/interrupts` shows them counting
   there). Keeping the NVMe handling on CPU0 is deliberate: the NVMe completions cannot be
   moved off the chained handler's CPU, and the recorder's own threads are not pinned.
 
@@ -343,13 +356,14 @@ The design targets the AMD EDF 2025.2 kernel, **6.12.40-xilinx** (linux-xlnx tag
 | 512 BDs per channel (`XILINX_DMA_NUM_DESCS`), allocated once per channel allocation in a ring with fixed next-pointers | `xilinx_dma.c:186`, `:1113-1166` |
 | A descriptor completes only when its **last** BD has the Cmplt bit; the residue is the sum over its BDs of `(control - status) & max_buffer_len`, passed to `callback_result` as `result.residue` | `xilinx_dma.c:1712-1742`, `:980-1021`, `:1047-1078` |
 | Consequence for TLAST: a packet that ends exactly on the last BD of a descriptor completes that descriptor with residue 0. A TLAST inside a descriptor would leave its remaining BDs to the next packet, which is why `PKT_LEN` must equal the buffer size | same |
-| The IOC interrupt threshold is set to the number of pending descriptors at each start; the IRQ handler marks the channel idle and starts all pending descriptors | `xilinx_dma.c:1560-1565`, `:1873-1921` |
+| The IOC interrupt threshold is set to the number of pending descriptors at each start; the IRQ handler marks the channel idle and starts all pending descriptors (stock driver) | `xilinx_dma.c:1560-1565`, `:1873-1921` |
 | `terminate_all` stops and resets the channel and frees pending, done, then active descriptors; `device_synchronize` is `tasklet_kill` (no callback after `dmaengine_terminate_sync`) | `xilinx_dma.c:2485-2519`, `:2521-2526`, `:913-924` |
 | Each channel node must have an interrupt (`of_irq_get` failure fails the probe) | `xilinx_dma.c:2912-2914` |
 | The S2MM channel is channel id 1 for `dmas = <&axi_dma_0 1>` (`s2mm_chan_id` starts at `max_channels / 2` = 1), also on an S2MM-only DMA | `xilinx_dma.c:131`, `:2881`, `:3098`, `:3004-3012` |
 | The MM2S channel is channel id 0 (`mm2s_chan_id` starts at 0, `tdest = id`), so `dmas = <&axi_dma_0 0>`; its interrupt is `of_irq_get(<mm2s dma-channel node>, 0)` -- `mm2s_introut` must be wired and described on the channel node, or the whole AXI DMA fails to probe | `xilinx_dma.c:2860-2867`, `:2912-2914` |
 | `prep_slave_sg` for `DMA_MEM_TO_DEV`: every sg entry becomes one or more BDs (split at `max_buffer_len`); SOP is set on the first BD of the descriptor and EOP on its last only, so a multi-hugepage buffer is one packet with TLAST on its last beat | `xilinx_dma.c:2208-2262` |
-| `start_transfer` returns while the channel is not idle; it writes `CURDESC` of the first pending descriptor and `TAILDESC` of the last, and sets the IRQ threshold to the pending count -- same code path for MM2S and S2MM (`ctrl_offset` 0x00 vs 0x30) | `xilinx_dma.c:1536-1607`, `:2867` |
+| `start_transfer` returns while the channel is not idle; it writes `CURDESC` of the first pending descriptor and `TAILDESC` of the last, and sets the IRQ threshold to the pending count -- same code path for MM2S and S2MM (`ctrl_offset` 0x00 vs 0x30) (stock driver) | `xilinx_dma.c:1536-1607`, `:2867` |
+| With `meta-fdrec`'s patch 0002 (AXI DMA, SG, not cyclic): `start_transfer` on a channel that is not idle calls `xilinx_dma_append_running`, which writes `TAILDESC` = last BD of the last pending descriptor and moves the pending descriptors to the active list, if the active tail's `next_desc` (and `next_desc_msb` with 64-bit addressing) is the first pending BD and the threshold written by the last start is 1; the IRQ handler sets `idle` only when the active list is empty | patched `xilinx_dma.c:1567-1608`, `:1630-1632`, `:1649`, `:2007-2011` |
 | `stop_transfer` clears `DMACR.RS` and polls `DMASR.Halted` with `xilinx_dma_poll_timeout(..., 0, XILINX_DMA_LOOP_COUNT)` = `readl_poll_timeout_atomic` with a 1000000 "us" timeout counted as delay-less iterations | `xilinx_dma.c:1307-1316`, `:530-532`, `:167` |
 | A failed MM2S descriptor completes with `DMA_TRANS_WRITE_FAILED` (S2MM: `READ_FAILED`) | `xilinx_dma.c:1063-1070` |
 | Freed segments go to the **tail** of the free list (`xilinx_dma_free_tx_segment`), allocation takes the head -- the reason a terminate (frees pending, done, active) reorders the ring, for either direction | `xilinx_dma.c:782-788`, `:710-726`, `:913-924` |

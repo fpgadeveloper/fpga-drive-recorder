@@ -62,7 +62,8 @@ buffers back into the fabric.
    after descriptors are queued.
 4. **AXI DMA** (`axi_dma_0`) — scatter-gather mode, S2MM channel only. It writes each packet
    into the buffer of the next descriptor and raises its interrupt when a descriptor
-   completes.
+   completes. The driver keeps the next buffers appended to its descriptor chain, so it runs
+   from one buffer into the next without waiting for software.
 5. **HP port** — the DMA's S2MM and SG masters go through an AXI SmartConnect
    (`axi_smc_dma`) to `S_AXI_HP2_FPD` (128 bits, 250 MHz, 4 GB/s peak). This path is not
    cache coherent. The kernel driver does the cache maintenance (see the driver
@@ -83,11 +84,11 @@ is the only failure mode, and it is always visible in `ING_DROP_COUNT`.
    **lossless**: when it is full, `TREADY` towards the DMA goes low and the DMA waits. `TKEEP`
    is ignored (whole 16-byte beats). The FIFO is needed because the sink
    consumes at a fixed rate and the DMA stream pauses briefly at every buffer boundary (the
-   driver starts the next MM2S descriptor from the completion interrupt, ~10 µs, occasionally
-   more): a full 64 KB FIFO bridges 65 µs at 1 GB/s and 20 µs at the 3.2 GB/s maximum. It is
-   a quarter of the ingest FIFO: a late restart on recording loses data, on playback it shows
-   as an underflow at the sink, and the driver keeps the AXI DMA interrupts off the CPU that
-   handles the NVMe completions (see the driver documentation). `EGR_BEATS_IN` counts beats written, `EGR_FIFO_LEVEL`
+   DMA's own descriptor fetch, and short DDR back-pressure; the driver keeps the next MM2S
+   descriptors appended to the running chain, so no software sits in that path): a full
+   64 KB FIFO bridges 65 µs at 1 GB/s and 20 µs at the 3.2 GB/s maximum. It is a quarter of
+   the ingest FIFO: a pause on recording loses data, on playback it only shows as an
+   underflow at the sink. `EGR_BEATS_IN` counts beats written, `EGR_FIFO_LEVEL`
    shows the fill level. `EGR_CTRL.FLUSH` makes the FIFO accept and discard everything the DMA
    sends (counted in `EGR_DISCARD`), so a transfer can always complete; during a `SOFT_RST`
    the same discard happens, so a soft reset never wedges the DMA.

@@ -72,7 +72,7 @@ recorder.
 * The `zcu106_hpc0` design uses the HPC0 FMC connector, which supports two SSDs, each with an
   independent 4-lane PCIe Gen3 interface (XDMA Root Ports). A Gen4 SSD links at Gen3 x4 (the
   Samsung 980 PRO 1TB and the Sabrent Rocket 2230 1TB: `8GT/s (downgraded)`). Inside an SSD's
-  cache a slot runs at up to the Gen3 x4 link's rate (~2.95-3.04 GB/s write, ~2.9-3.2 GB/s read,
+  cache a slot runs at up to the Gen3 x4 link's rate (~2.94-3.04 GB/s write, ~2.9-3.2 GB/s read,
   measured with both drives); two SSDs in RAID0 record at the generator's
   3.2 GB/s (see [Where the bottlenecks are](benchmarks.md#where-the-bottlenecks-are)).
 * The design builds with the free Vivado Standard Edition (no license needed).

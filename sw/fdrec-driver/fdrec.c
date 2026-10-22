@@ -26,9 +26,11 @@
  *     FOLL_WRITE | FOLL_LONGTERM), builds an sg_table per buffer and maps it
  *     against the DMA channel's device: DMA_FROM_DEVICE for a record set,
  *     DMA_TO_DEVICE for a playback set (one direction per registered set).
- *   - START hands every buffer to the driver's DMA queue, from which one
- *     buffer at a time is kept active and one pending in xilinx_dma (one
- *     dmaengine slave-sg descriptor per buffer, see FDREC_DMA_DEPTH); the
+ *   - START hands every buffer to the driver's DMA queue, from which three
+ *     buffers at a time are kept in the AXI DMA's descriptor chain (one
+ *     dmaengine slave-sg descriptor per buffer, see FDREC_DMA_DEPTH): the
+ *     engine runs from one buffer into the next without a software restart;
+ *     the IRQ and the completion callback only recycle buffers. The
  *     packetizer asserts TLAST every buf_size / 16 beats, so every descriptor
  *     ends exactly on a buffer boundary.
  *   - WAIT_FILLED hands a completed buffer to user space, RELEASE re-queues it.
@@ -36,7 +38,7 @@
  *     the ingest FIFO fills and beats are dropped and counted. That is the
  *     only failure mode; it is reported, never hidden.
  *   - Playback mirrors it: PLAY_SUBMIT queues a buffer the app has filled
- *     (same one active + one pending feed, one descriptor = one packet, the
+ *     (same three-deep descriptor chain, one descriptor = one packet, the
  *     xilinx_dma MM2S prep sets SOP on the first and EOP = TLAST on the last
  *     BD), PLAY_WAIT_DONE hands back the buffers the DMA has read. If the app
  *     cannot refill buffers fast enough, the MM2S stream runs dry and the sink
@@ -126,7 +128,7 @@
 #include "fdrec_uapi.h"
 
 #define DRV_NAME		"fdrec"
-#define FDREC_DRV_VERSION	"1.1"
+#define FDREC_DRV_VERSION	"1.2"
 
 /* AXI DMA (xilinx_dma) facts used for validation. The driver pre-allocates
  * this many buffer descriptors per channel (XILINX_DMA_NUM_DESCS). */
@@ -134,22 +136,34 @@
 #define XDMA_DEFAULT_LEN_WIDTH	23	/* without xlnx,sg-length-width */
 
 /*
- * Descriptors kept in xilinx_dma at any time: one being filled + one pending.
+ * Descriptors kept in xilinx_dma at any time: one being filled + two queued
+ * behind it in the hardware chain.
  *
- * xilinx_dma starts pending descriptors only when the channel is idle (from
- * its IRQ handler), all of them in one go, and sets the AXI DMA interrupt
- * coalescing threshold to their number. Handing it the whole ring therefore
- * makes the channel run in batches: one interrupt per batch, no buffer
- * visible to user space until the whole batch is full (the disk sits idle
- * meanwhile, then gets a burst), and the DMA halts at each batch tail until
- * the IRQ handler restarts it. With exactly one pending descriptor the IRQ
- * handler starts it with threshold 1 straight from hard-IRQ context when the
- * active one completes (the DMA pauses only for the IRQ latency, which the
- * ingest FIFO absorbs), and the completion callback queues the next free
- * buffer as the new pending one. Every buffer is seen by user space as soon
- * as it is full.
+ * meta-fdrec patches xilinx_dma (0002-dmaengine-xilinx_dma-append-
+ * descriptors-to-a-running-SG-chain.patch) so that a descriptor issued while
+ * the AXI DMA channel runs is appended to the running scatter-gather chain
+ * by moving TAILDESC, as the bare-metal xaxidma driver does. The engine then
+ * continues into the next buffer by itself: no restart from the DMA IRQ
+ * handler at the buffer boundary, whose latency was rarely 120-415 us on
+ * zcu106_hpc0 (more than the ingest FIFO covers). The ingest FIFO only has
+ * to cover the BD fetch and DDR back-pressure.
+ *
+ * We submit and issue one descriptor at a time: the first one starts the
+ * idle channel with the interrupt coalescing threshold 1 (one interrupt per
+ * buffer, every buffer seen by user space as soon as it is full), the
+ * others are appended. Handing xilinx_dma several descriptors before one
+ * issue_pending would start them as a batch with a larger threshold (and the
+ * patch does not append to such a chain). Each completion lets the callback
+ * (tasklet) submit the next free buffer; with two descriptors queued behind
+ * the active one, the tasklet has two buffer times (2 x 2.6 ms at 3.2 GB/s
+ * with 8 MiB buffers) before the engine reaches the end of the chain.
+ *
+ * The append requires the BD ring order of xilinx_dma (the running tail's
+ * hardware next pointer must be the new descriptor's first BD; see
+ * fdrec_renew_one). If it does not hold, xilinx_dma silently falls back to
+ * the restart from its IRQ handler; nothing here can see that.
  */
-#define FDREC_DMA_DEPTH		2
+#define FDREC_DMA_DEPTH		3
 
 enum fdrec_buf_state {
 	BUF_FREE,	/* registered, not queued (stopped); playback: the
@@ -347,8 +361,8 @@ static void fd_chk_enable_pending(struct fdrec_dev *fd);
  * our callback, so the lock order is always qlock -> chan->lock).
  *
  * issue_pending starts the descriptor at once if the channel is idle;
- * otherwise it stays pending and the IRQ handler starts it when the active
- * descriptor completes.
+ * otherwise (patched xilinx_dma, see FDREC_DMA_DEPTH) it is appended to the
+ * running chain, and the engine continues into it without a restart.
  */
 static int fdrec_submit(struct fdrec_dev *fd, struct fdrec_buf *b)
 {
@@ -448,8 +462,8 @@ static void fdrec_dma_done(void *param, const struct dmaengine_result *res)
 	 * without the sink; that is "primed" too. */
 	if (play)
 		fd_chk_enable_pending(fd);
-	/* The IRQ handler has already started the pending descriptor (if any);
-	 * queue the next free (playback: next submitted) buffer behind it. */
+	/* The engine has already moved on to the next descriptor of its chain;
+	 * append the next free (playback: next submitted) buffer behind it. */
 	fdrec_feed(fd);
 	spin_unlock_irqrestore(&fd->qlock, flags);
 	wake_up(&fd->wq);	/* WAIT_FILLED/WAIT_DONE/poll, the drain in STOP */
@@ -460,11 +474,14 @@ static void fdrec_dma_done(void *param, const struct dmaengine_result *res)
  * next-pointers are fixed at allocation time, and allocates them from a free
  * list. dmaengine_terminate_sync() frees the pending/done/active descriptors
  * in that order, which leaves the free list out of ring order; descriptors
- * allocated from it later would not be chained correctly in hardware. A
- * release + request rebuilds the ring (xilinx_dma_alloc_chan_resources), so
- * we do that after every STOP. The DMA device (and so the buffer mappings)
- * does not change. The same BD code serves both directions, so the MM2S
- * channel gets the same treatment after PLAY_STOP.
+ * allocated from it later would not be chained correctly in hardware, and
+ * the patched xilinx_dma would not append them to the running chain (it
+ * checks the running tail's next pointer and otherwise falls back to the
+ * restart from its IRQ handler, see FDREC_DMA_DEPTH). A release + request
+ * rebuilds the ring (xilinx_dma_alloc_chan_resources), so we do that after
+ * every STOP. The DMA device (and so the buffer mappings) does not change.
+ * The same BD code serves both directions, so the MM2S channel gets the same
+ * treatment after PLAY_STOP.
  */
 static int fdrec_renew_one(struct fdrec_dev *fd, enum fdrec_dir_idx slot)
 {
@@ -773,9 +790,10 @@ static int fdrec_start(struct fdrec_dev *fd, struct fdrec_start __user *uarg)
 
 	/*
 	 * Hand every buffer to the DMA queue; fdrec_feed() submits the first
-	 * FDREC_DMA_DEPTH of them (buffer 0 starts at once, buffer 1 pending)
-	 * and each completion submits the next. The packetizer is still
-	 * disabled, so nothing completes before it is enabled below.
+	 * FDREC_DMA_DEPTH of them (buffer 0 starts the channel, buffers 1 and 2
+	 * are appended to its chain) and each completion submits the next. The
+	 * packetizer is still disabled, so nothing completes before it is
+	 * enabled below.
 	 */
 	for (i = 0; i < fd->nbufs; i++)
 		dma_sync_sgtable_for_device(fd->dma_dev, &fd->bufs[i].sgt,
@@ -1290,11 +1308,11 @@ static int fdrec_play_wait_done(struct fdrec_dev *fd, struct fdrec_play_done __u
  * to a crawl would leave xilinx_dma_stop_transfer() spinning in its atomic
  * poll for minutes (see the S2MM note above fdrec_drain). So PLAY_STOP stops
  * feeding, sets EGR_CTRL.FLUSH -- the egress FIFO then accepts and discards
- * every beat from the DMA -- waits until the (at most two) descriptors left
- * in xilinx_dma complete, and terminates the now idle channel. Without the
- * flush control (VERSION 1.0 has no MM2S anyway) or if the wait times out we
- * terminate regardless and warn. An idle MM2S channel at the end of a normal
- * playback halts at once; nothing is discarded then.
+ * every beat from the DMA -- waits until the (at most FDREC_DMA_DEPTH)
+ * descriptors left in xilinx_dma complete, and terminates the now idle
+ * channel. Without the flush control (VERSION 1.0 has no MM2S anyway) or if
+ * the wait times out we terminate regardless and warn. An idle MM2S channel
+ * at the end of a normal playback halts at once; nothing is discarded then.
  */
 static void fdrec_play_stop(struct fdrec_dev *fd, struct fdrec_play_stats *st)
 {
@@ -1870,17 +1888,16 @@ static const struct attribute_group *fdrec_groups[] = {
 /* The AXI DMA's max_buffer_len, as xilinx_dma derives it (2^width - 1) */
 /*
  * CPU for the AXI DMA channel interrupts (both channels of the recorder's AXI
- * DMA). xilinx_dma restarts the next descriptor from its hard-IRQ handler, so
- * the DMA pauses at every buffer boundary for the latency of that interrupt,
- * and the ingest / egress FIFO must bridge it (20-30 us at 2.2-3.2 GB/s).
- * On Zynq UltraScale+ every NVMe completion interrupt of a PL PCIe root port
- * (XDMA bridge MSI controller, a chained handler) is handled on CPU0, in
- * bursts of up to ~0.8 ms (512 KB completions with cache invalidation, the
- * PCIe path being non-coherent). A DMA interrupt on CPU0 waits behind them:
- * playback under-runs whenever an SSD read completes just before a buffer
- * boundary (measured: zcu106_hpc0, one 980 PRO, 2500 MB/s, 0/5 clean on CPU0,
- * 5/5 on CPU3). Default -1: the last online CPU (none if only one CPU is
- * online); -2: leave the affinity alone; >= 0: that CPU.
+ * DMA). With the patched xilinx_dma (see FDREC_DMA_DEPTH) the engine does not
+ * wait for this interrupt at a buffer boundary, but the interrupt still
+ * drives the buffer recycling (completion -> tasklet -> next buffer appended
+ * to the chain) and the restart in the fallback case. On Zynq UltraScale+
+ * every NVMe completion interrupt of a PL PCIe root port (XDMA bridge MSI
+ * controller, a chained handler) is handled on CPU0, in bursts of up to
+ * ~0.8 ms (512 KB completions with cache invalidation, the PCIe path being
+ * non-coherent); a DMA interrupt on CPU0 waits behind them. Keeping it off
+ * CPU0 keeps the recycling prompt. Default -1: the last online CPU (none if
+ * only one CPU is online); -2: leave the affinity alone; >= 0: that CPU.
  */
 static int dma_irq_cpu = -1;
 module_param(dma_irq_cpu, int, 0444);

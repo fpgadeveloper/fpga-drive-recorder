@@ -164,10 +164,10 @@ Example output (representative):
 
 ```none
 fdrec: recording to /mnt/rec/test.dat (32 x 8 MB buffers, qd 8, fixed buffers, test pattern) -- Ctrl-C to stop
-     10.0s   1000.1 MB/s (avg   999.9)       10.000 GB  inflight  2  fifo_hwm   842/16384  drops 0
+     10.0s   1000.1 MB/s (avg   999.9)       10.000 GB  inflight  2  fifo_hwm     1/16384  drops 0
 fdrec: /mnt/rec/test.dat: 10737418240 bytes (1280 buffers) in 10.74 s, 1000.0 MB/s
-fdrec: dropped beats 0 (at stop: 0), FIFO high-water 842 of 16384 beats, max writes in flight 8
-RESULT bytes=10737418240 seconds=10.737 rate_bps=1000000000 drops=0 fifo_hwm=842 fifo_depth=16384 error=0
+fdrec: dropped beats 0 (at stop: 0), FIFO high-water 1 of 16384 beats, max writes in flight 8
+RESULT bytes=10737418240 seconds=10.737 rate_bps=1000000000 drops=0 fifo_hwm=1 fifo_depth=16384 error=0
 exit code 0
 ```
 

@@ -136,13 +136,13 @@ and average write rate (MB/s = 10^6 bytes/s), total data, writes in flight, the 
 high-water mark against its depth, and the drop count:
 
 ```
-     12.0s   1000.2 MB/s (avg   999.8)       11.998 GB  inflight  2  fifo_hwm   311/4096  drops 0
+     12.0s   1000.2 MB/s (avg   999.8)       11.998 GB  inflight  2  fifo_hwm     1/16384  drops 0
 ```
 
 The summary ends with one machine-readable line, used by `fdbench.sh`:
 
 ```
-RESULT bytes=10737418240 seconds=10.737 rate_bps=1000000000 drops=0 fifo_hwm=311 fifo_depth=4096 error=0
+RESULT bytes=10737418240 seconds=10.737 rate_bps=1000000000 drops=0 fifo_hwm=1 fifo_depth=16384 error=0
 ```
 
 Exit codes: **0** = recording complete with zero dropped beats, **2** = beats were dropped (the
@@ -260,13 +260,16 @@ Notes:
 
 ### Tuning: the FIFO budget at buffer boundaries
 
-At every buffer boundary the AXI DMA pauses briefly: `xilinx_dma` lets the channel go idle at
-the end of the current buffer and its interrupt handler starts the next one (see
-[Kernel driver](driver.md), "Interaction with the `xilinx_dma` driver").
-The gap is about **9 µs** at every boundary with a tail of **15-20 µs** (interrupt latency plus
-DMA restart), measured on a Zynq UltraScale+ target with a trace of the DMA interrupt and the
-ingest FIFO high-water marks of its recordings. The FIFO between the DMA and the fabric must
-bridge it at the stream rate:
+At a buffer boundary the AXI DMA moves on to the next buffer by itself: the driver keeps the
+next two buffers appended to the DMA's running descriptor chain (see
+[Kernel driver](driver.md), "Interaction with the `xilinx_dma` driver"). The FIFO between the
+DMA and the fabric only bridges the DMA's own descriptor fetch and short DDR back-pressure.
+
+`fdrec` and `fdplay` still check a conservative budget of **15 µs**: the pause at a boundary
+when `xilinx_dma` cannot append and restarts the DMA from its interrupt handler instead (the
+fallback when its descriptor ring is out of order, or a kernel without the `meta-fdrec`
+patch), measured on a Zynq UltraScale+ target as about 9 µs with a tail of 15-20 µs
+(interrupt latency plus restart):
 
     FIFO bytes / rate  >  ~15 µs
 
@@ -276,22 +279,24 @@ bridge it at the stream rate:
 | egress (playback) | 4096 beats = 64 KB | 4.4 GB/s |
 | (a 512-beat FIFO, for comparison) | 8 KB | ~550 MB/s |
 
-The 15-20 µs tail is typical, not a hard bound. The figures assume the AXI DMA interrupts
-are handled on a CPU of their own (the driver's `dma_irq_cpu` default); on CPU0 of a Zynq
-UltraScale+ target they queue behind the NVMe completion bursts and the gap reaches 0.2 ms.
-Even then a restart occasionally takes longer than the ingest FIFO covers: in RAID0
-recordings on `zcu106_hpc0` (Cortex-A53 at 1.2 GHz) one boundary in a run took 120-415 µs
-(seen at 2500-3200 MB/s, in 32 GB as well as 350 GiB recordings, with either pair of drives),
-while on `vck190_fmcp1` (Cortex-A72) the longest boundary seen was 59 µs and 3200 MB/s was
-clean over 350 and 480 GiB (see
-[Benchmarks](benchmarks.md#5-latency-budgets-not-bandwidth)).
+In the fallback the 15-20 µs tail is typical, not a hard bound: on a Cortex-A53 target an
+interrupt is rarely several hundred µs late, more than any FIFO here covers, which is why the
+driver keeps the DMA chained across boundaries.
 
-Below that bound, underflows (playback) or drops (recording) mean the SSD or filesystem is too
-slow; above it they also appear at buffer boundaries however fast the SSD is. `fdplay` and
-`fdrec` print a warning when the programmed rate exceeds the budget of the design's FIFO
-(read from `EGR_FIFO_DEPTH` / `ING_FIFO_DEPTH`). Larger buffers (`--buf-size`) mean fewer
-boundaries but do not shorten the gap. A custom sink or source with its own buffering adds to
-the FIFO.
+The interrupt latency still matters in one place: each buffer's completion interrupt lets
+the driver append the next free buffer to the chain, and with two buffers queued behind the
+one being transferred it has two buffer periods (5.2 ms at 3.2 GB/s with 8 MiB buffers) to do
+so. The driver pins the AXI DMA interrupts to a CPU of their own (`dma_irq_cpu`, default the
+last online CPU), away from CPU0 of a Zynq UltraScale+ target, where they would queue behind
+the NVMe completion bursts.
+
+Within the budget, underflows (playback) or drops (recording) mean the SSD or filesystem is
+too slow. `fdplay` and `fdrec` print a warning when the programmed rate exceeds the budget of
+the design's FIFO (read from `EGR_FIFO_DEPTH` / `ING_FIFO_DEPTH`). With driver 1.2 that warning
+concerns only the fallback: with the chain in place the ingest FIFO's high-water mark stays at
+1-7 beats up to 3200 MB/s (see [Benchmarks](benchmarks.md#5-latency-budgets-not-bandwidth)). Larger buffers
+(`--buf-size`) mean fewer boundaries and more time for the recycling. A custom sink or source
+with its own buffering adds to the FIFO.
 
 ## fdverify
 
@@ -344,9 +349,9 @@ exit code 1, see `--timeout`) is reported as `ERROR`:
 ```
  rate MB/s  result           drops    fifo_hwm/depth      avg MB/s    fdverify
  ---------  ------           -----    --------------      --------    --------
-       250  PASS                 0          29/4096         250.0        PASS
+       250  PASS                 0           1/16384         250.0        PASS
        ...
-      1750  DROPS          1234567        4097/4096        1702.3        gaps
+      1750  DROPS          1234567       16385/16384        1702.3        gaps
 
 fdbench: sustained recording rate: 1500 MB/s (/dev/md0, xfs, 32G per step)
 ```
@@ -355,7 +360,7 @@ The highest passing rate is the **sustained recording rate** of that board + SSD
 filesystem. The default 32 GB per step is large enough to exhaust the SLC write cache of
 typical smaller SSDs, so the result is the sustained rate rather than the cache rate; use a
 larger `--size` for drives with very large caches (the 1 TB drives on the
-[Benchmarks](benchmarks.md#long-recordings-past-the-slc-cache) page cache 72-120 GB each, so
+[Benchmarks](benchmarks.md#long-recordings-past-the-slc-cache) page cache 70-125 GB each, so
 32 GB stays inside the cache), or confirm the result with one `fdrec` recording longer than
 the cache. Run it once on a single drive
 (`fdsetup-raid0.sh --single`) and once on RAID0; the [Benchmarks](benchmarks) page has

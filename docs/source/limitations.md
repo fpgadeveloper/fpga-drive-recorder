@@ -9,8 +9,9 @@ and read goes through the Linux block layer, the NVMe driver and the filesystem,
 recorder needs a running Linux system, and its rate is bounded by the SSDs and by the Linux
 I/O path (see [Where the bottlenecks are](benchmarks.md#where-the-bottlenecks-are)). On the
 Zynq UltraScale+ targets the PCIe Root Ports are Gen3 x4, so a fast Gen4 SSD writes at most
-~2.95-3.04 GB/s per slot, the rate of the Gen3 x4 link (one drive records up to
-2750-3000 MB/s); RAID0 of two SSDs records at the generator's 3.2 GB/s inside the SLC cache.
+~2.94-3.04 GB/s per slot, the rate of the Gen3 x4 link (one drive records up to
+2750-3000 MB/s); RAID0 of two SSDs records at the generator's 3.2 GB/s, inside the SLC cache and, with the
+1 TB drives measured, past it.
 On the Versal target
 `vck190_fmcp1` the Root Ports are Gen4 x4, and one drive records at the generator's 3.2 GB/s
 inside its SLC cache.
@@ -35,20 +36,20 @@ available from Missing Link Electronics. See Missing Link Electronics'
 * **The playback sink shares the source clock.** `user_data_sink` runs on `src_clk`; a sink
   with its own clock needs its own clock-domain crossing inside the hierarchy (see
   [custom data sink](custom_sink)).
-* **FIFO depth vs. the DMA restart gap.** At every buffer boundary the AXI DMA pauses while
-  the driver's interrupt handler starts the next buffer: about 9 µs at every boundary with a
-  15-20 µs tail on `zcu106_hpc0` (with the DMA interrupts on their own CPU, the driver's
-  default). The 256 KB ingest FIFO covers 82 µs at the 3.2 GB/s source maximum and the 64 KB
-  egress FIFO 20 µs. Rarely the restart takes much longer: in RAID0 recordings on
-  `zcu106_hpc0` one boundary in a run took 120-415 µs at 2500-3200 MB/s and lost
-  8085-54 968 beats (five such events in eleven 350 GiB runs and one in a 32 GB run, with
-  either pair of drives); on `vck190_fmcp1` the longest boundary seen was 59 µs and
-  2250-3200 MB/s were clean over 350 and 480 GiB (see
-  [Benchmarks](benchmarks.md#5-latency-budgets-not-bandwidth)).
-  So a long RAID0 recording at 2500 MB/s or more on a Zynq UltraScale+ target may still drop a
-  few tens of thousands of beats once in a few hundred GB. Removing the software from the boundary path
-  (a descriptor chain that keeps the DMA armed across buffers, with overrun detection) is the
-  planned follow-up. A design with a higher stream rate needs deeper FIFOs (`FIFO_DEPTH`,
+* **FIFO depth and buffer boundaries.** The AXI DMA runs from one buffer into the next
+  without a software restart: the driver keeps the next two buffers appended to its running
+  descriptor chain, through a `xilinx_dma` kernel patch in `meta-fdrec` (see
+  [Kernel driver](driver.md)). At a boundary the ingest and egress FIFOs therefore only
+  bridge the DMA's own descriptor fetch and short DDR back-pressure; the 256 KB ingest FIFO
+  lasts 82 µs at the 3.2 GB/s source maximum and the 64 KB egress FIFO 20 µs. Two conditions
+  remain. The DMA completion interrupt recycles the buffers and must be handled within two
+  buffer periods (5.2 ms at 3.2 GB/s with 8 MiB buffers), or the chain runs out and the DMA
+  waits as if no buffer were free. And `xilinx_dma` appends only while its descriptor ring is
+  in order (the driver renews the DMA channels after every stop to keep it so); otherwise it
+  falls back to restarting the DMA from its interrupt handler, and the pause at each
+  boundary is the interrupt latency again, which on a Cortex-A53 target is rarely several
+  hundred µs, more than the FIFO covers. A kernel built without the patch behaves like that
+  fallback. A design with a higher stream rate needs deeper FIFOs (`FIFO_DEPTH`,
   `EGR_FIFO_DEPTH`; the FIFOs use block RAM, as `xpm_fifo_async` cannot use UltraRAM).
 
 ## Software

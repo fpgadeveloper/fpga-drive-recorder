@@ -52,8 +52,43 @@ Yocto / EDF 2025.2 flow (no PetaLinux flow, no standalone application). First ta
   rare 120-240 µs restart. Cost: 42.5 more block RAM tiles on `zcu106_hpc0` (114 to 156.5 of
   312, WNS +0.253 ns); `uzev` 156.5 of 312 (+0.045 ns), `vck190_fmcp1` 166 of 967 (+0.079 ns). The
   register map stays at 1.1 (`ING_FIFO_DEPTH` reports the depth; no software change). The
-  [Benchmarks](benchmarks.md) page gives the figures measured with both changes; the earlier
-  figures are in the git history of the documentation (before 2026-10-20).
+  figures measured with these changes and driver 1.1 are in the git history of the
+  documentation; the [Benchmarks](benchmarks.md) page now gives driver 1.2 figures (below).
+* Driver 1.2 and `xilinx_dma` kernel patch
+  `0002-dmaengine-xilinx_dma-append-descriptors-to-a-running-SG-chain.patch` (2026-10-21): the AXI DMA
+  now runs across buffer boundaries without a software restart. Until driver 1.1 the driver
+  kept one active and one pending descriptor in `xilinx_dma`, and the stock `xilinx_dma`
+  started the pending one from its interrupt handler when the active one completed, so the
+  DMA paused at every boundary for the interrupt latency plus the restart: about 9 µs, with a
+  15-20 µs tail, but on `zcu106_hpc0` (Cortex-A53) rarely 120-415 µs, more than the
+  16384-beat ingest FIFO covers (82 µs at 3.2 GB/s): long RAID0 recordings at 2500-3200 MB/s
+  lost 8085-54 968 beats at one boundary once in a few hundred GB (five events in eleven
+  350 GiB runs and one in a 32 GB run). A kernel trace of the S2MM interrupt showed these to
+  be late interrupt delivery, not a slow handler: the CPU that owns the DMA interrupts runs
+  ordinary kernel code with interrupts disabled for 90-660 µs (bulk page frees from the block
+  softirq, the periodic memory-cgroup statistics flush). The kernel patch appends a descriptor issued while
+  the channel runs to the running scatter-gather chain by moving `TAILDESC`, as AMD's
+  bare-metal driver does, and the driver keeps three descriptors in the chain
+  (`FDREC_DMA_DEPTH` 2 -> 3), which gives the buffer recycling two buffer periods of slack.
+  The register map and the hardware are unchanged (same `BOOT.BIN`). Re-measured with
+  driver 1.2 on 2026-10-21: the full benchmark matrix of both pairs, the Sabrent Rocket 2230 1TB
+  and the Samsung 980 PRO 1TB, on both `vck190_fmcp1` and `zcu106_hpc0`. The ingest FIFO high-water mark is now a rate floor of
+  1-7 beats (7 at 3000-3200 MB/s) in every clean recording from 4 GiB to 480 GiB, where it was
+  700-16 363 beats before. Past the SLC cache every RAID0 pair records 3200 MB/s, the
+  generator maximum: 350 GiB at 2500-3200 MB/s with the Sabrent pair on both boards (on
+  `zcu106_hpc0` 2500 and 2750 MB/s lost beats before) and the 980 PRO pair on `zcu106_hpc0`
+  (before: 2750 MB/s; 3000 and 3200 MB/s lost beats), and 480 GiB at 3000 and 3200 MB/s with
+  the 980 PRO pair on `vck190_fmcp1` (high-water mark 7 beats throughout; before: 7112 and
+  8896). One Sabrent on `vck190_fmcp1` is now clean at every 32 GB step up to 3200 MB/s and
+  holds 1750 MB/s past its cache (before: 1000 MB/s, limited by rare ~0.65 s write stalls that
+  did not recur in 54 recordings); its RAID0 pair is clean at every step (before: up to
+  2750 MB/s in the 2026-10-17 sweep). The single-drive limits are the drives' and unchanged:
+  1750 MB/s past the cache, and inside it on the Gen3 x4 slots of `zcu106_hpc0` 3000 MB/s
+  (980 PRO) and 2750 MB/s (Sabrent). Playback reaches the 3.2 GB/s sink maximum in every
+  configuration except one Sabrent on `zcu106_hpc0` (3000 MB/s, its slot's read rate); the
+  isolated read stalls of one 980 PRO on `zcu106_hpc0` (2 of 17 runs on 2026-10-20) did not
+  recur (17 of 17). In the four sessions no beat was lost at a buffer boundary for any reason
+  other than the ring running out behind the drive.
 * Documentation: this site, with generated block diagrams, the register map, the driver
   and file-format references, and the benchmarks.
 
@@ -75,3 +110,10 @@ Yocto / EDF 2025.2 flow (no PetaLinux flow, no standalone application). First ta
   history. What the older drives showed about themselves is kept as drive facts on
   [Supported SSDs](supported_ssds) and [Benchmarks](benchmarks): the 970 EVO's single NVMe I/O
   queue, its ~14 GB SLC cache and ~330 MB/s after it, and the 950 PRO's lack of a cache cliff.
+* 2026-10-21: the benchmarks show only measurements made with driver 1.2. The earlier
+  figures, including the measured cache figures of the Samsung 970 EVO 250GB and 950 PRO
+  256GB, remain in the git history. The full four-combination matrix (the Sabrent Rocket 2230
+  1TB and Samsung 980 PRO 1TB pairs, each on `vck190_fmcp1` and `zcu106_hpc0`, single drive
+  and RAID0) is measured with driver 1.2 in every benchmark table: 32 GB sweeps, burst and
+  40 GB recordings, long recordings past the SLC cache, playback, CPU load, the SLC cache and
+  the `dd` comparison.

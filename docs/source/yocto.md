@@ -92,6 +92,7 @@ On top of the EDF defaults, two layers are added:
   | `recipes-kernel/fdrec-mod` | the `fdrec.ko` kernel module, built from `sw/fdrec-driver` and `include/` of this repository, loaded at boot |
   | `recipes-apps/fdrec-apps` | `fdrec`, `fdplay`, `fdverify`, `fdbench.sh`, `fdsetup-raid0.sh`, built from `sw/fdrec-apps` (depends on `liburing`) |
   | `recipes-kernel/linux/linux-xlnx_%.bbappend` + `fdrec.cfg` | kernel options: `CONFIG_XILINX_DMA`, `CONFIG_HUGETLBFS`, `CONFIG_IO_URING`, `CONFIG_MD_RAID0` (+ `CONFIG_BLK_DEV_MD`), `CONFIG_XFS_FS` |
+  | `recipes-kernel/linux/linux-xlnx/0001-…`, `0002-…` | two `xilinx_dma` patches, applied on every target: `0001-dmaengine-xilinx_dma-poll-with-a-delay-so-the-timeout-is-real-time.patch` bounds the channel-stop poll to about 1 s (see [Troubleshooting](troubleshooting.md)); `0002-dmaengine-xilinx_dma-append-descriptors-to-a-running-SG-chain.patch` appends descriptors issued while an AXI DMA channel runs to its running chain, so the DMA runs across buffer boundaries without a software restart (see [Kernel driver](driver.md)) |
   | `recipes-core/images/edf-linux-disk-image.bbappend` | image packages: the module and apps, `liburing`, `mdadm`, `nvme-cli`, `fio`, `xfsprogs`, `e2fsprogs-mke2fs`, and bench tools (`devmem2`, `i2c-tools`, `ethtool`, `iproute2`, `iperf3`, `phytool`, `pciutils`, SSH server) |
 
   The recipes take their sources straight from the repository (`file://sw/...` and

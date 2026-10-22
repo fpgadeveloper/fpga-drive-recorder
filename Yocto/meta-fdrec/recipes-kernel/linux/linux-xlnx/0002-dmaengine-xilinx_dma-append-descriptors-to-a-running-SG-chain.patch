@@ -1,0 +1,251 @@
+From: Jeff Johnson <jjohnson@opsero.com>
+Date: Tue, 20 Oct 2026 21:05:00 -0400
+Subject: [PATCH] dmaengine: xilinx_dma: append descriptors to a running SG
+ chain
+
+On an AXI DMA in scatter-gather mode the driver starts pending
+descriptors only when the channel is idle: xilinx_dma_start_transfer()
+returns while chan->idle is false, and the descriptors submitted in the
+meantime wait on pending_list until the completion interrupt of the
+running chain. xilinx_dma_irq_handler() then sets chan->idle and starts
+them (CURDESC, DMACR, TAILDESC) from hard-IRQ context. The engine
+therefore stops at the tail of every chain and stays stopped for the
+interrupt latency plus the handler's register accesses, even when the
+next descriptor was submitted long before.
+
+For a continuous stream into an S2MM channel that gap has to be covered
+by a FIFO in front of the DMA. An FPGA design that records a 3.2 GB/s
+stream into a ring of 8 MiB buffers (one descriptor per buffer, a new
+one always submitted well ahead) measured a 9 us gap at every buffer
+boundary on a ZynqMP (Cortex-A53, the IRQ pinned to a CPU of its own),
+but over hundreds of GB the restart was occasionally 120-415 us late,
+more than a 256 KiB FIFO (82 us at 3.2 GB/s) can absorb: one overflow
+every few hundred GB at 2.5-3.2 GB/s. No FIFO size bounds the interrupt
+latency of a general-purpose kernel.
+
+The AXI DMA does not need a restart: the SG engine compares each BD it
+completes with TAILDESC and keeps fetching along the hardware next
+pointers until it has processed the BD at TAILDESC. While the channel is
+running (DMACR.RS = 1), a write to TAILDESC moves that pause point; if
+the engine has already paused at the old tail (DMASR.Idle = 1) the write
+makes it resume, continuing at the old tail's next pointer (PG021,
+TAILDESC register description). The bare-metal driver relies on exactly
+this: XAxiDma_BdRingToHw() only writes the new tail while the ring runs.
+
+Do the same for an AXI DMA SG channel that is not cyclic:
+
+- xilinx_dma_start_transfer(), channel not idle: new helper
+  xilinx_dma_append_running() takes the last BD of active_list (the
+  current hardware tail) and the first BD of pending_list. If the tail's
+  hardware next pointer (next_desc, plus next_desc_msb with 64-bit
+  addressing) is that BD, it writes TAILDESC with the last BD of the last
+  pending descriptor, moves pending_list onto active_list and clears
+  desc_pendingcount. CURDESC, DMACR (run/stop, coalescing, delay) are not
+  touched. The BDs are in coherent memory and were written before the
+  descriptor was submitted; xilinx_write() orders the register write
+  after them (writel/lo_hi_writeq include the I/O write barrier), as on
+  the existing start path.
+
+  The next-pointer test is what makes the append exact: the BD segments
+  are pre-linked in ring order at channel allocation and are allocated
+  and freed in order, so the test holds in normal operation, but a
+  terminate frees the lists out of order (pending, done, active) and
+  later descriptors are then not chained to the running tail. If the
+  test fails nothing changes: the descriptors stay pending and are
+  started by the interrupt handler once the chain has completed, as
+  before.
+
+  The append is also done only while the interrupt coalescing threshold
+  written by the last start (new field chan->irq_threshold) is 1. The
+  start path sets the threshold to the number of descriptors it starts;
+  with a larger threshold an appended descriptor could complete without
+  reaching it and never be reported. A client that submits and issues
+  descriptors one at a time (the case this is for) always runs with
+  threshold 1: the first one starts an idle channel with a pending count
+  of 1 and the rest are appended. A client that issues a batch keeps the
+  old behaviour for that batch.
+
+- xilinx_dma_irq_handler(): for the same channel type, chan->idle is set
+  only when xilinx_dma_complete_descriptor() has emptied active_list.
+  That function already stops at the first descriptor whose last BD does
+  not have the Cmplt bit, so appended descriptors that are still in
+  flight stay on active_list, the engine is still running, and it must
+  not be restarted from CURDESC. If active_list is empty the engine has
+  processed the BD at TAILDESC (TAILDESC is always the last BD of
+  active_list) and the old start path applies. The other DMA types, the
+  cyclic mode and the non-SG mode keep chan->idle = true.
+
+Races (chan->lock is held by both xilinx_dma_issue_pending() and the
+interrupt handler, so they are serialized):
+
+(a) The handler for the completion of the last active descriptor runs
+    before the append: it empties active_list, sets idle and starts the
+    pending descriptors (if already submitted) the old way, with CURDESC,
+    RS and TAILDESC; a later issue_pending finds pending_list empty or an
+    idle channel and does the same. Nothing changes compared to today.
+
+(b) The append runs first, whether the engine is still in the old tail
+    or already paused there with its interrupt pending: the TAILDESC
+    write extends the chain or resumes the engine. The handler for the
+    old tail's completion then moves only the finished descriptors to
+    done_list; the appended ones lack Cmplt, active_list is not empty,
+    idle stays false, and start_transfer() with an empty pending_list
+    does nothing. Each appended descriptor raises its own completion
+    interrupt (threshold 1); the handler of the last one finds
+    active_list empty and sets idle.
+
+(c) Several descriptors complete before one handler run (interrupt
+    latency longer than a descriptor): the handler retires all of them
+    in order and computes idle from what is left. A completion that sets
+    DMASR.IOC_Irq again after the handler's acknowledge produces one more
+    interrupt that finds nothing new to retire, as today.
+
+Residue, tx_status, the error path (chan->err set by the handler, the
+channel reset on the next submit), terminate and reset are unchanged.
+
+Upstream-Status: Pending
+Signed-off-by: Jeff Johnson <jjohnson@opsero.com>
+---
+ drivers/dma/xilinx/xilinx_dma.c | 94 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 92 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/dma/xilinx/xilinx_dma.c b/drivers/dma/xilinx/xilinx_dma.c
+--- a/drivers/dma/xilinx/xilinx_dma.c
++++ b/drivers/dma/xilinx/xilinx_dma.c
+@@ -423,6 +423,9 @@
+  * @tdest: TDEST value for mcdma
+  * @has_vflip: S2MM vertical flip
+  * @irq_delay: Interrupt delay timeout
++ * @irq_threshold: AXI DMA interrupt coalescing threshold written by the last
++ *	start (0 = not written yet); descriptors are appended to a running
++ *	chain only while it is 1
+  */
+ struct xilinx_dma_chan {
+ 	struct xilinx_dma_device *xdev;
+@@ -462,6 +465,7 @@
+ 	u16 tdest;
+ 	bool has_vflip;
+ 	u8 irq_delay;
++	u32 irq_threshold;
+ };
+ 
+ /**
+@@ -1537,6 +1541,72 @@
+ }
+ 
+ /**
++ * xilinx_dma_append_running - Append pending descriptors to a running chain
++ * @chan: Driver specific channel struct pointer
++ *
++ * AXI DMA in scatter-gather mode, non-cyclic: hand the pending descriptors
++ * to an engine that is still processing active_list by moving its tail
++ * pointer, as the bare-metal driver does (XAxiDma_BdRingToHw). The SG engine
++ * compares each BD it finishes with TAILDESC; a new, later tail keeps it
++ * fetching, and if it has already stopped at the old tail (DMASR.Idle with
++ * DMACR.RS still set) the TAILDESC write resumes it. Either way it continues
++ * at the old tail's hardware next pointer; CURDESC, DMACR and RS are left
++ * alone. This removes the hard-IRQ restart (and its latency) from the gap
++ * between two descriptors.
++ *
++ * Done only when the old tail's next pointer is the first BD of the pending
++ * chain (the pre-linked BD ring order, which holds while segments are
++ * allocated and freed in order) and the interrupt coalescing threshold is 1
++ * (one interrupt per completed descriptor, so the appended descriptors are
++ * reported individually). Otherwise nothing changes: the IRQ handler starts
++ * the pending descriptors once active_list has completed.
++ *
++ * Context: called with chan->lock held.
++ * Return: true if the pending descriptors were appended.
++ */
++static bool xilinx_dma_append_running(struct xilinx_dma_chan *chan)
++{
++	struct xilinx_dma_tx_descriptor *active_tail, *pend_head, *pend_tail;
++	struct xilinx_axidma_tx_segment *active_tail_seg, *pend_head_seg;
++	struct xilinx_axidma_tx_segment *pend_tail_seg;
++
++	if (chan->xdev->dma_config->dmatype != XDMA_TYPE_AXIDMA ||
++	    !chan->has_sg || chan->cyclic || chan->irq_threshold != 1)
++		return false;
++
++	if (list_empty(&chan->active_list) || list_empty(&chan->pending_list))
++		return false;
++
++	active_tail = list_last_entry(&chan->active_list,
++				      struct xilinx_dma_tx_descriptor, node);
++	pend_head = list_first_entry(&chan->pending_list,
++				     struct xilinx_dma_tx_descriptor, node);
++	pend_tail = list_last_entry(&chan->pending_list,
++				    struct xilinx_dma_tx_descriptor, node);
++	active_tail_seg = list_last_entry(&active_tail->segments,
++					  struct xilinx_axidma_tx_segment, node);
++	pend_head_seg = list_first_entry(&pend_head->segments,
++					 struct xilinx_axidma_tx_segment, node);
++	pend_tail_seg = list_last_entry(&pend_tail->segments,
++					struct xilinx_axidma_tx_segment, node);
++
++	/* The engine follows the old tail's next pointer: it must be ours */
++	if (active_tail_seg->hw.next_desc != lower_32_bits(pend_head_seg->phys))
++		return false;
++	if (chan->ext_addr && active_tail_seg->hw.next_desc_msb !=
++	    upper_32_bits(pend_head_seg->phys))
++		return false;
++
++	/* Move the pause point (resumes the engine if it already paused) */
++	xilinx_write(chan, XILINX_DMA_REG_TAILDESC, pend_tail_seg->phys);
++
++	list_splice_tail_init(&chan->pending_list, &chan->active_list);
++	chan->desc_pendingcount = 0;
++
++	return true;
++}
++
++/**
+  * xilinx_dma_start_transfer - Starts DMA transfer
+  * @chan: Driver specific channel struct pointer
+  */
+@@ -1552,8 +1622,15 @@
+ 	if (list_empty(&chan->pending_list))
+ 		return;
+ 
+-	if (!chan->idle)
++	if (!chan->idle) {
++		/*
++		 * The engine is still working on active_list. Extend its
++		 * chain if that is safe; otherwise the IRQ handler starts the
++		 * pending descriptors once active_list has completed.
++		 */
++		xilinx_dma_append_running(chan);
+ 		return;
++	}
+ 
+ 	head_desc = list_first_entry(&chan->pending_list,
+ 				     struct xilinx_dma_tx_descriptor, node);
+@@ -1569,6 +1646,7 @@
+ 		reg |= chan->desc_pendingcount <<
+ 				  XILINX_DMA_CR_COALESCE_SHIFT;
+ 		dma_ctrl_write(chan, XILINX_DMA_REG_DMACR, reg);
++		chan->irq_threshold = chan->desc_pendingcount;
+ 	}
+ 
+ 	if (chan->has_sg)
+@@ -1918,7 +1996,19 @@
+ 		      XILINX_DMA_DMASR_DLY_CNT_IRQ)) {
+ 		spin_lock(&chan->lock);
+ 		xilinx_dma_complete_descriptor(chan);
+-		chan->idle = true;
++		/*
++		 * AXI DMA SG (non-cyclic): descriptors may have been appended
++		 * to the running chain (xilinx_dma_append_running()), and
++		 * xilinx_dma_complete_descriptor() leaves the unfinished ones
++		 * on active_list. The engine has reached its tail only when
++		 * none is left; until then it keeps running and must not be
++		 * restarted from CURDESC.
++		 */
++		if (chan->xdev->dma_config->dmatype == XDMA_TYPE_AXIDMA &&
++		    chan->has_sg && !chan->cyclic)
++			chan->idle = list_empty(&chan->active_list);
++		else
++			chan->idle = true;
+ 		chan->start_transfer(chan);
+ 		spin_unlock(&chan->lock);
+ 	}
