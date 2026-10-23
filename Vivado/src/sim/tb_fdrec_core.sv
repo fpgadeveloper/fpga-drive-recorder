@@ -4,12 +4,15 @@
 //
 // tb_fdrec_core -- self-checking testbench for fdrec_core (+ fdrec_tpg as source)
 //
-// fdrec_tpg (src_clk 200 MHz) -> fdrec_core -> DMA sink model (dp_clk 250 MHz),
-// registers driven through an AXI4-Lite BFM. The FIFO depth is reduced to 256
-// beats to keep the simulation short.
+// fdrec_tpg (src_clk 250 MHz) -> fdrec_core -> DMA sink model (dp_clk 250 MHz,
+// independent phase), registers driven through an AXI4-Lite BFM. The FIFO
+// depth is reduced to 256 beats to keep the simulation short. Runs for
+// DATA_WIDTH 128 and 256 (see the sim_runs line below): every 16-byte word of
+// every beat is checked, sequence numbers are in words, counters in beats.
 //
 // Checks (spec section 9, Phase-1 RTL criteria):
-//   1. Register block: RO identification registers, RW readback, byte strobes
+//   1. Register block: RO identification registers (VERSION 1.2, BEAT_BYTES),
+//      RW readback, byte strobes
 //   2. No-drop recording: contiguous data, TLAST framing, accounting
 //   3. Drops under a stalled/slow sink: DROP_COUNT == offered - accepted,
 //      every sequence gap seen by the sink adds up to DROP_COUNT, OVERFLOW
@@ -21,12 +24,18 @@
 //   6. TPG_CTRL.SEQ_RST self-clearing, SOFT_RST semantics
 //
 // Prints PASS / FAIL and calls $finish (sim.tcl contract).
+//
+// sim_runs: DATA_WIDTH=128 DATA_WIDTH=256
 
 `timescale 1ns / 1ps
 
-module tb_fdrec_core;
+module tb_fdrec_core #(
+  parameter integer DATA_WIDTH = 256
+);
 
-  localparam integer SRC_HZ = 200000000;
+  localparam integer WPB    = DATA_WIDTH / 128;   // pattern words per beat
+  localparam integer KW     = DATA_WIDTH / 8;     // TKEEP width = beat bytes
+  localparam integer SRC_HZ = 250000000;
   localparam integer DP_HZ  = 250000000;
   localparam integer DEPTH  = 256;
 
@@ -38,27 +47,28 @@ module tb_fdrec_core;
                     ING_DROP_COUNT_LO = 12'h028, ING_DROP_COUNT_HI = 12'h02C,
                     ING_BEATS_IN_LO = 12'h030, ING_BEATS_IN_HI = 12'h034,
                     ING_FIFO_DEPTH = 12'h038, PKT_CTRL = 12'h040, PKT_LEN = 12'h044,
-                    PKT_BEATS_OUT_LO = 12'h048, PKT_BEATS_OUT_HI = 12'h04C;
+                    PKT_BEATS_OUT_LO = 12'h048, PKT_BEATS_OUT_HI = 12'h04C,
+                    BEAT_BYTES = 12'h0BC;
 
   // ---------------------------------------------------------------------------
   // Clocks / resets
   // ---------------------------------------------------------------------------
   reg src_clk = 1'b0, dp_clk = 1'b0;
   reg src_resetn = 1'b0, dp_resetn = 1'b0;
-  always #2.5 src_clk = ~src_clk;                       // 200 MHz
+  always #2.0 src_clk = ~src_clk;                       // 250 MHz
   initial begin #1.3; forever #2.0 dp_clk = ~dp_clk; end // 250 MHz, offset phase
 
   // ---------------------------------------------------------------------------
   // DUT
   // ---------------------------------------------------------------------------
-  wire [127:0] src_tdata;
+  wire [DATA_WIDTH-1:0] src_tdata;
   wire         src_tvalid, src_tready;
   wire         tpg_enable, tpg_seq_rst;
   wire [31:0]  tpg_rate_inc;
   wire [63:0]  tpg_seq_next;
 
-  wire [127:0] m_tdata;
-  wire [15:0]  m_tkeep;
+  wire [DATA_WIDTH-1:0] m_tdata;
+  wire [KW-1:0] m_tkeep;
   wire         m_tlast, m_tvalid;
   reg          m_tready = 1'b1;
 
@@ -70,7 +80,9 @@ module tb_fdrec_core;
   wire [1:0]   bresp, rresp;
   wire [31:0]  rdata;
 
-  fdrec_tpg tpg (
+  fdrec_tpg #(
+    .DATA_WIDTH    (DATA_WIDTH)
+  ) tpg (
     .src_clk       (src_clk),
     .src_resetn    (src_resetn),
     .tpg_enable    (tpg_enable),
@@ -83,6 +95,7 @@ module tb_fdrec_core;
   );
 
   fdrec_core #(
+    .DATA_WIDTH (DATA_WIDTH),
     .SRC_CLK_HZ (SRC_HZ),
     .DP_CLK_HZ  (DP_HZ),
     .FIFO_DEPTH (DEPTH)
@@ -123,8 +136,8 @@ module tb_fdrec_core;
     .tpg_rate_inc  (tpg_rate_inc),
     .tpg_seq_next  (tpg_seq_next),
     // playback path unused here (covered by tb_fdrec_check)
-    .s_axis_mm2s_tdata  (128'd0),
-    .s_axis_mm2s_tkeep  (16'hFFFF),
+    .s_axis_mm2s_tdata  ({DATA_WIDTH{1'b0}}),
+    .s_axis_mm2s_tkeep  ({KW{1'b1}}),
     .s_axis_mm2s_tlast  (1'b0),
     .s_axis_mm2s_tvalid (1'b0),
     .s_axis_mm2s_tready (),
@@ -219,9 +232,9 @@ module tb_fdrec_core;
     m_tready <= (($urandom % 100) < ready_pct);
 
   longint     delivered = 0;      // beats seen by the sink
-  longint     gaps = 0;           // sum of sequence gaps seen by the sink
+  longint     gaps = 0;           // sum of sequence gaps seen by the sink (beats)
   longint     pkts = 0;           // TLAST count
-  longint     mon_expect = 0;     // next expected sequence number
+  longint     mon_expect = 0;     // next expected sequence number (words)
   integer     pkt_len_tb = 1;     // PKT_LEN the monitor checks against
   longint     pkt_cnt = 0;        // beats in the current packet
   reg         en_prev = 1'b0;
@@ -230,6 +243,7 @@ module tb_fdrec_core;
 
   always @(posedge dp_clk) begin : sink_mon
     longint s;
+    reg [63:0] lo, hi;
     // packet counter restarts when the packetizer gate opens
     if (dut.u_pkt.en_q && !en_prev) pkt_cnt = 0;
     en_prev <= dut.u_pkt.en_q;
@@ -237,16 +251,24 @@ module tb_fdrec_core;
       tvalid_while_off = tvalid_while_off + 1;
     if (m_tvalid && m_tready) begin
       delivered = delivered + 1;
-      if (m_tkeep !== 16'hFFFF) fail("TKEEP not all ones");
+      if (m_tkeep !== {KW{1'b1}}) fail("TKEEP not all ones");
       if (mon_on) begin
         s = m_tdata[63:0];
-        if (m_tdata[127:64] !== ~m_tdata[63:0])
-          fail($sformatf("pattern: upper %h != ~lower %h", m_tdata[127:64], m_tdata[63:0]));
+        for (int k = 0; k < WPB; k++) begin
+          lo = m_tdata[128*k +: 64];
+          hi = m_tdata[128*k + 64 +: 64];
+          if (hi !== ~lo)
+            fail($sformatf("pattern: word %0d upper %h != ~lower %h", k, hi, lo));
+          if (lo !== s + k)
+            fail($sformatf("word %0d carries seq %0d in a beat starting at %0d", k, lo, s));
+        end
+        if (s % WPB != 0)
+          fail($sformatf("beat starts at seq %0d, not a multiple of %0d", s, WPB));
         if (s < mon_expect)
           fail($sformatf("sequence went backwards: %0d after expecting %0d", s, mon_expect));
         else
-          gaps = gaps + (s - mon_expect);
-        mon_expect = s + 1;
+          gaps = gaps + (s - mon_expect) / WPB;
+        mon_expect = s + WPB;
       end
       pkt_cnt = pkt_cnt + 1;
       if (m_tlast !== (pkt_cnt == pkt_len_tb))
@@ -318,11 +340,11 @@ module tb_fdrec_core;
       $display("%s: offered %0d  BEATS_IN %0d  DROP %0d  BEATS_OUT %0d  delivered %0d  gaps %0d  packets %0d  SEQ_NEXT %0d",
                tag, offered, in_c, drop_c, out_c, delivered, gaps, pkts, seqn);
       check({tag, " BEATS_IN == offered"}, in_c, offered);
-      check({tag, " SEQ_NEXT == offered"}, seqn, offered);
+      check({tag, " SEQ_NEXT == offered x words per beat"}, seqn, offered * WPB);
       check({tag, " BEATS_OUT == delivered"}, out_c, delivered);
       check({tag, " DROP_COUNT == offered - accepted"}, drop_c, offered - delivered);
       // every dropped beat shows up as a sequence gap (or trails the last beat)
-      check({tag, " gaps + trailing == DROP_COUNT"}, gaps + (seqn - mon_expect), drop_c);
+      check({tag, " gaps + trailing == DROP_COUNT"}, gaps + (seqn - mon_expect) / WPB, drop_c);
     end
   endtask
 
@@ -339,8 +361,9 @@ module tb_fdrec_core;
     wait_dp(400);
 
     // ---------------- 1. Register block ----------------
-    $display("--- 1. register block");
-    axi_read(VERSION, v);        check("VERSION", v, 32'h0001_0001);
+    $display("--- 1. register block (DATA_WIDTH %0d)", DATA_WIDTH);
+    axi_read(VERSION, v);        check("VERSION", v, 32'h0001_0002);
+    axi_read(BEAT_BYTES, v);     check("BEAT_BYTES", v, DATA_WIDTH / 8);
     axi_read(SRC_CLK_HZ, v);     check("SRC_CLK_HZ", v, SRC_HZ);
     axi_read(DP_CLK_HZ, v);      check("DP_CLK_HZ", v, DP_HZ);
     axi_read(ING_FIFO_DEPTH, v); check("ING_FIFO_DEPTH", v, DEPTH);
@@ -349,7 +372,7 @@ module tb_fdrec_core;
     axi_read(12'h03C, v);        check("unmapped 0x03C", v, 0);
     axi_read(12'hFFC, v);        check("unmapped 0xFFC", v, 0);
     axi_write(VERSION, 32'hDEAD_BEEF);
-    axi_read(VERSION, v);        check("VERSION is RO", v, 32'h0001_0001);
+    axi_read(VERSION, v);        check("VERSION is RO", v, 32'h0001_0002);
     axi_write(TPG_RATE_INC, 32'h1234_5678);
     axi_read(TPG_RATE_INC, v);   check("TPG_RATE_INC rw", v, 32'h1234_5678);
     axi_write(TPG_RATE_INC, 32'hAB00_0000, 4'b1000);
@@ -509,8 +532,8 @@ module tb_fdrec_core;
     // first beat after the soft reset carried seq 0
     if (gaps != 0) fail("after SOFT_RST: sequence did not restart at 0");
 
-    if (errors == 0) $display("PASS: tb_fdrec_core");
-    else             $display("FAIL: tb_fdrec_core (%0d errors)", errors);
+    if (errors == 0) $display("PASS: tb_fdrec_core DATA_WIDTH=%0d", DATA_WIDTH);
+    else             $display("FAIL: tb_fdrec_core DATA_WIDTH=%0d (%0d errors)", DATA_WIDTH, errors);
     $finish;
   end
 

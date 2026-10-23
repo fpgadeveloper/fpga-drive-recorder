@@ -32,17 +32,19 @@
 //     stale pre-reset snapshot can reappear. EGR_* registers belong to the
 //     egress FIFO (dp_clk domain). SOFT_RST also disables the checker, clears
 //     EGR_CTRL.FLUSH and all CHK_/EGR_ counters; CHK_RATE_INC survives.
+//   * BEAT_BYTES (1.2): bytes per fabric beat (DATA_WIDTH / 8 of fdrec_core).
 
 `timescale 1ns / 1ps
 
 module fdrec_regs #(
-  parameter integer SRC_CLK_HZ = 200000000,
+  parameter integer SRC_CLK_HZ = 250000000,
   parameter integer DP_CLK_HZ  = 250000000,
-  parameter integer FIFO_DEPTH = 4096,
+  parameter integer FIFO_DEPTH = 8192,
   parameter integer CNT_W      = 13,
   parameter integer EGR_FIFO_DEPTH = 4096,
   parameter integer EGR_CNT_W  = 13,
-  parameter [31:0]  VERSION    = 32'h0001_0001
+  parameter integer BEAT_BYTES = 32,
+  parameter [31:0]  VERSION    = 32'h0001_0002
 ) (
   input  wire          clk,
   input  wire          resetn,
@@ -149,11 +151,13 @@ module fdrec_regs #(
   localparam [11:0] R_EGR_DISC_LO     = 12'h0B0;
   localparam [11:0] R_EGR_DISC_HI     = 12'h0B4;
   localparam [11:0] R_EGR_FIFO_LEVEL  = 12'h0B8;
+  // Datapath width (1.2)
+  localparam [11:0] R_BEAT_BYTES      = 12'h0BC;
 
   localparam [31:0] CHK_RATE_RESET  = 32'h8000_0000;  // always ready
   localparam integer CHK_RST_CYCLES = 256;
 
-  localparam [31:0] PKT_LEN_RESET = 32'h0008_0000;  // 8 MB / 16 B
+  localparam [31:0] PKT_LEN_RESET = 32'h0008_0000;  // beats (16 MB at 32 B/beat)
   localparam integer SRST_MIN_CYCLES = 128;
 
   assign s_axi_bresp = 2'b00;
@@ -411,6 +415,7 @@ module fdrec_regs #(
           R_EGR_DISC_LO:     begin s_axi_rdata <= egr_discard[31:0];  ed_hi_l <= egr_discard[63:32]; end
           R_EGR_DISC_HI:     s_axi_rdata <= ed_hi_l;
           R_EGR_FIFO_LEVEL:  s_axi_rdata <= egr_level;
+          R_BEAT_BYTES:      s_axi_rdata <= BEAT_BYTES;
           default:           s_axi_rdata <= 32'd0;
         endcase
       end else if (s_axi_rready) begin

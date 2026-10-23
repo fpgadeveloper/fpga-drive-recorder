@@ -89,6 +89,80 @@ Yocto / EDF 2025.2 flow (no PetaLinux flow, no standalone application). First ta
   isolated read stalls of one 980 PRO on `zcu106_hpc0` (2 of 17 runs on 2026-10-20) did not
   recur (17 of 17). In the four sessions no beat was lost at a buffer boundary for any reason
   other than the ring running out behind the drive.
+* 256-bit datapath at 250 MHz (2026-10-22): the generator and the checker exchanged 128-bit
+  beats with the memory at a 200 MHz `src_clk`, one beat per clock, so 3.2 GB/s was the
+  ceiling of every recording and playback measurement, below what a PCIe Gen4 x4 SSD can
+  write. The datapath now carries 8.0 GB/s end to end.
+  * Hardware: a `DATA_WIDTH` parameter (128 or 256) on every `fdrec_*` module, 256 on all
+    three targets; `src_clk` 200 -> 250 MHz. The test pattern stays a sequence of 16-byte
+    words: a 32-byte beat carries two consecutive words, so recordings are byte-identical to
+    those of the 128-bit datapath, and the checker checks every word of a beat. The AXI DMA
+    streams and memory sides are 256 bits wide, with bursts of 128 beats (4 KB). Ingest FIFO
+    16384 × 16 B -> 8192 × 32 B (256 KB, the same block RAM; 32 µs at 8 GB/s), egress FIFO
+    4096 × 16 B -> 4096 × 32 B (64 KB -> 128 KB; 16 µs at 8 GB/s). Generator and sink
+    maximum 3.2 -> 8.0 GB/s.
+  * Zynq UltraScale+ (`zcu106_hpc0`, `uzev`): `S_AXI_HP2_FPD`, the AXI DMA's port into PS
+    DDR, and the HP-port side of its interconnect run on a new `pl_clk3`, requested at
+    333 MHz, the port's maximum; the PS makes 322.19 MHz on the ZCU106 and 327.77 MHz on the
+    UltraZed-EV, so the 128-bit port carries 5.16 / 5.24 GB/s at most, the ceiling of these
+    targets (their PCIe Root Ports are Gen3 x4). `dp_clk` and `src_clk` moved to the IOPLL
+    (249.975 MHz on the ZCU106, 249.997 MHz on the UltraZed-EV), so the RPLL change of
+    `pl_clk3` does not move them. Versal (`vck190_fmcp1`): the AXI DMA's NoC port is 256 bits wide at
+    `dp_clk`, with a QoS request of 8000 MB/s each way (was 4000); the PCIe bridges' shared
+    NoC port requests 7000 MB/s each way (was 1720).
+  * Register map 1.2: new register `BEAT_BYTES` (0x0BC, bytes per fabric beat). Beat
+    counters, FIFO depths, levels and high-water marks and `PKT_LEN` are in fabric beats;
+    `TPG_SEQ_NEXT` and `CHK_LAST_SEQ` are in 16-byte words.
+  * Driver 1.3: reads the beat size from `BEAT_BYTES` at probe (16 when it reads 0, register
+    map 1.1) instead of assuming 16 bytes, and reports it in `fdrec_info.beat_bytes`, the new
+    `beat_bytes` sysfs attribute and the probe message. The descriptor chain and the
+    interrupt pinning of driver 1.2 are unchanged.
+  * Apps (`fdrec-apps` 1.3): the beat size comes from the driver; the file header's
+    `beat_bytes` is 32. `fdverify` checks 16-byte words for either beat size and compares
+    the missing words with `drop_count` × `beat_bytes` / 16; `fdplay` compares the checker's
+    GAP_BEATS with the recording's `drop_count` the same way, so recordings of either beat
+    size play. New `fdrec --no-write`: the DMA ring runs without any file I/O, to measure the
+    fabric -> DDR path without an SSD. `fdbench.sh` sweeps by default from 500 MB/s in
+    500 MB/s steps to `SRC_CLK_HZ` × `beat_bytes` (8000 MB/s). The FIFO-budget warning of
+    `fdrec` / `fdplay` now says that it concerns only the fallback restart from the DMA
+    interrupt handler (driver 1.2 keeps the DMA running across buffer boundaries).
+  * Measured on 2026-10-22 with register map 1.2 and driver 1.3, both SSD pairs (two Sabrent
+    Rocket 2230 1TB, two Samsung 980 PRO 1TB) on both `zcu106_hpc0` and `vck190_fmcp1` (see
+    [Benchmarks](benchmarks.md)). Without an SSD (`fdrec --no-write`, playback of a recording
+    held in the ring): `zcu106_hpc0` records and plays back 5000 MB/s, limited by
+    `S_AXI_HP2_FPD` (above it the DMA moves a flat 5153-5155 MB/s); `vck190_fmcp1` records
+    7750 MB/s and plays back 7500 MB/s while the DMA delivers 7.99 GB/s: with `src_clk` =
+    `dp_clk` a source or sink at one beat per clock leaves the DMA side no drain headroom.
+    The 3.2 GB/s generator no longer hides the drives. On `vck190_fmcp1` (Gen4 x4) one drive
+    records 4500 MB/s over 32 GB (the 980 PRO writes ~4.95-4.98 GB/s inside its cache, the
+    Sabrent ~4.6 GB/s) and plays back 6000 MB/s (980 PRO; 6500 MB/s with PCIe MaxPayload
+    256 bytes) or 4500 MB/s (Sabrent, its read rate); the RAID0 pairs record 6500 MB/s
+    (980 PRO) and 4000 MB/s (Sabrent) over 32 GB with the default ring, 7000 MB/s with 16 MB
+    buffers (both), and play back 6000 / 5500 MB/s. On `zcu106_hpc0` (Gen3 x4) one drive
+    records 2500 MB/s (Sabrent) or 3000 MB/s (980 PRO) over 32 GB, its slot's write rate, and
+    plays back 3000 MB/s; the RAID0 pairs record 3500 / 4500 MB/s with the default ring and
+    4500 / 5000 MB/s with 64 buffers (5000 MB/s, the 980 PRO pair, is the knee of HP2), and
+    play back 3500 / 4000 MB/s. Past the SLC cache one drive holds 1750 MB/s on every
+    combination, the pairs 3000-3500 MB/s over 350-480 GiB. The CPU cost per byte is
+    unchanged (`fdrec` ~2.3-2.6 % of a Cortex-A53 core and ~1.5-1.7 % of a Cortex-A72 core per
+    100 MB/s), and the ingest FIFO high-water mark is a rate floor of 1 beat up to 3500 MB/s
+    and 8 beats at 7000 MB/s. Two findings: the RAID0 losses in one gap at the start of a
+    recording after idle time (at 0.27 GB with the default ring) are the drives waking from
+    NVMe APST power saving (measured on `vck190_fmcp1` with the Sabrent pair at 4500-5000 MB/s:
+    2 of 11 recordings clean with APST on, the image's default, 5 of 5 with APST off; the
+    remedies are a 512 MB ring or APST off); and PCIe MaxPayload 256 bytes (set with `setpci`,
+    MaxReadReq kept at 512) lifts a link's reads by 10-11 % on both families, which raises
+    single-drive playback where the drive reads faster than its link (one 980 PRO: 6500 MB/s
+    on `vck190_fmcp1`, 3500 MB/s on `zcu106_hpc0`; not the Sabrent, which reads its data at
+    ~4.5 GB/s) and gains no recording step. The ceilings that remain, per device family, are
+    listed with their causes and the ways past them in
+    [Where the bottlenecks are](benchmarks.md#where-the-bottlenecks-are): on Zynq UltraScale+
+    the Gen3 x4 slot (~2.9-3.0 GB/s), one `fdplay` thread for playback from a RAID0 file
+    (3500-4000 MB/s) and HP2 (~5.0 GB/s, reached by the 980 PRO pair; the host's own write path
+    carries 6.07 GB/s to two slots); on Versal the drives, the read efficiency of a Gen4 x4 link
+    at 128-byte MaxPayload (~6.36 GB/s), the PCIe path into DDR that both Root Ports share
+    (~7.2-7.6 GB/s writing, ~7.9-8.0 GB/s reading), the host I/O path (RAID0 ~7.1-7.4 GB/s
+    recording, 5500-6000 MB/s playback from a file) and the fabric itself (7750 / 7500 MB/s).
 * Documentation: this site, with generated block diagrams, the register map, the driver
   and file-format references, and the benchmarks.
 
@@ -117,3 +191,14 @@ Yocto / EDF 2025.2 flow (no PetaLinux flow, no standalone application). First ta
   and RAID0) is measured with driver 1.2 in every benchmark table: 32 GB sweeps, burst and
   40 GB recordings, long recordings past the SLC cache, playback, CPU load, the SLC cache and
   the `dd` comparison.
+* 2026-10-22: the benchmarks and every other page show only measurements made with the
+  256-bit datapath (register map 1.2, driver 1.3); the figures of the 128-bit datapath remain
+  in the git history. The method is shorter: 32 GB sweeps from 2500 MB/s in 500 MB/s steps
+  with an early stop after two failing steps, 3 runs at the highest clean and the first
+  failing step, bursts and long recordings at the top rates, and the `dd` comparison at the
+  top rates only. New: measurements without an SSD (`fdrec --no-write`, playback from the
+  ring), PCIe MaxPayload 256 bytes per drive on both families, the host's PCIe-to-DDR ceiling
+  on `vck190_fmcp1`, the NVMe APST start-up stall (the section on the first writes after
+  `fstrim` became [Start-up stalls and the ring size](benchmarks.md#start-up-stalls-and-the-ring-size)),
+  and a list of every ceiling per device family in
+  [Where the bottlenecks are](benchmarks.md#where-the-bottlenecks-are).

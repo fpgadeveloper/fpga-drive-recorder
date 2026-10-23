@@ -4,20 +4,29 @@
 //
 // tb_fdrec_tpg -- self-checking testbench for fdrec_tpg
 //
+// Runs for DATA_WIDTH 128 and 256 (sim.tcl, see the sim_runs line below).
+//
 // Checks:
-//   * pattern: every beat has TDATA[127:64] == ~TDATA[63:0] and TDATA[63:0] ==
-//     the expected sequence number (contiguous from 0)
+//   * pattern: every 16-byte word k of every beat has word[127:64] ==
+//     ~word[63:0] and word[63:0] == the expected sequence number (contiguous
+//     from 0 across words and beats: a beat carries seq, seq+1, ...)
 //   * TREADY is ignored (held low for the whole test; the TPG keeps emitting)
 //   * rate accuracy within 1% (and within 2 beats) for 6 rates incl. the
 //     maximum and a clamped value above the maximum
-//   * tpg_seq_next readback == number of beats emitted
+//   * tpg_seq_next readback == words emitted (beats x words per beat)
 //   * tpg_seq_rst returns seq to 0; tpg_enable = 0 stops emission
 //
 // Prints PASS / FAIL and calls $finish (sim.tcl contract).
+//
+// sim_runs: DATA_WIDTH=128 DATA_WIDTH=256
 
 `timescale 1ns / 1ps
 
-module tb_fdrec_tpg;
+module tb_fdrec_tpg #(
+  parameter integer DATA_WIDTH = 256
+);
+
+  localparam integer WPB = DATA_WIDTH / 128;   // pattern words per beat
 
   reg          clk = 1'b0;
   reg          resetn = 1'b0;
@@ -25,12 +34,14 @@ module tb_fdrec_tpg;
   reg          tpg_seq_rst = 1'b0;
   reg  [31:0]  tpg_rate_inc = 32'd0;
   wire [63:0]  tpg_seq_next;
-  wire [127:0] tdata;
+  wire [DATA_WIDTH-1:0] tdata;
   wire         tvalid;
 
-  always #2.5 clk = ~clk;   // 200 MHz
+  always #2.0 clk = ~clk;   // 250 MHz
 
-  fdrec_tpg dut (
+  fdrec_tpg #(
+    .DATA_WIDTH    (DATA_WIDTH)
+  ) dut (
     .src_clk       (clk),
     .src_resetn    (resetn),
     .tpg_enable    (tpg_enable),
@@ -56,13 +67,18 @@ module tb_fdrec_tpg;
   reg  [63:0] exp_seq = 64'd0;
   longint     beats = 0;
 
-  always @(posedge clk) begin
+  always @(posedge clk) begin : mon
+    reg [63:0] lo, hi;
     if (tvalid) begin
-      if (tdata[127:64] !== ~tdata[63:0])
-        fail($sformatf("pattern: upper %h != ~lower %h", tdata[127:64], tdata[63:0]));
-      if (tdata[63:0] !== exp_seq)
-        fail($sformatf("sequence: got %0d expected %0d", tdata[63:0], exp_seq));
-      exp_seq <= tdata[63:0] + 64'd1;
+      for (int k = 0; k < WPB; k++) begin
+        lo = tdata[128*k +: 64];
+        hi = tdata[128*k + 64 +: 64];
+        if (hi !== ~lo)
+          fail($sformatf("pattern: word %0d upper %h != ~lower %h", k, hi, lo));
+        if (lo !== exp_seq + k)
+          fail($sformatf("sequence: word %0d got %0d expected %0d", k, lo, exp_seq + k));
+      end
+      exp_seq <= tdata[63:0] + WPB;
       beats   <= beats + 1;
     end
   end
@@ -113,11 +129,11 @@ module tb_fdrec_tpg;
     measure_rate(32'h0147_AE14, 400000);  // 0.01
     measure_rate(32'h6666_6666, 50000);   // 0.8
 
-    // Readback: seq_next == beats emitted so far (contiguous from 0)
-    if (tpg_seq_next !== beats[63:0])
-      fail($sformatf("tpg_seq_next %0d != beats emitted %0d", tpg_seq_next, beats));
+    // Readback: seq_next == words emitted so far (contiguous from 0)
+    if (tpg_seq_next !== beats * WPB)
+      fail($sformatf("tpg_seq_next %0d != words emitted %0d", tpg_seq_next, beats * WPB));
     else
-      $display("seq_next readback ok: %0d", tpg_seq_next);
+      $display("seq_next readback ok: %0d (%0d beats x %0d words)", tpg_seq_next, beats, WPB);
 
     // Sequence reset: seq returns to 0, next beat carries 0
     @(negedge clk) tpg_seq_rst = 1'b1;
@@ -127,7 +143,7 @@ module tb_fdrec_tpg;
     if (tpg_seq_next !== 64'd0) fail("seq not reset by tpg_seq_rst");
     exp_seq = 64'd0;
     measure_rate(32'h8000_0000, 1000);
-    if (tpg_seq_next !== 64'd1000)
+    if (tpg_seq_next !== 1000 * WPB)
       fail($sformatf("after seq_rst + 1000 beats, seq_next = %0d", tpg_seq_next));
 
     // seq_rst while enabled holds output off
@@ -142,8 +158,8 @@ module tb_fdrec_tpg;
     exp_seq = 64'd0;
     repeat (5) @(posedge clk);
 
-    if (errors == 0) $display("PASS: tb_fdrec_tpg (%0d beats checked)", beats);
-    else             $display("FAIL: tb_fdrec_tpg (%0d errors)", errors);
+    if (errors == 0) $display("PASS: tb_fdrec_tpg DATA_WIDTH=%0d (%0d beats checked)", DATA_WIDTH, beats);
+    else             $display("FAIL: tb_fdrec_tpg DATA_WIDTH=%0d (%0d errors)", DATA_WIDTH, errors);
     $finish;
   end
 

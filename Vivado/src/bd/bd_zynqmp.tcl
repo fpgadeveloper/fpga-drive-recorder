@@ -77,15 +77,32 @@ if {$dual_design} {
 }
 
 # FPGA Drive Recorder: PS clocks and HP port for the recording datapath
-#   pl_clk1 = 250 MHz : dp_clk  (AXI DMA, packetizer, ingest read side, HP2, fdrec registers)
+#   pl_clk1 = 250 MHz : dp_clk  (AXI DMA, packetizer, ingest read side, egress write side,
+#                       fdrec registers, SmartConnect slave side)
 #                       + S_AXI_HP0/HP1_FPD (root ports' M_AXI_B -> PS DDR, the SSD DMA path):
 #                       128-bit x 250 MHz = 4.0 GB/s per port (pl_clk0 would cap it at 1.60 GB/s)
-#   pl_clk2 = 200 MHz : src_clk (test pattern generator / user data source, ingest write side)
-#   S_AXI_HP2_FPD (128-bit) : AXI DMA S2MM + MM2S + SG masters -> PS DDR (non-coherent)
+#   pl_clk2 = 250 MHz : src_clk (test pattern generator / user data source and sink,
+#                       ingest write side, egress read side): 256 bits x 250 MHz = 8.0 GB/s
+#   pl_clk3 = 333 MHz : S_AXI_HP2_FPD only (saxihp2_fpd_aclk; DS925 max for the PS-PL AXI
+#   requested           interfaces): 128 bits x 333 MHz = 5.33 GB/s peak
+#   S_AXI_HP2_FPD (128-bit) : AXI DMA S2MM + MM2S + SG masters -> PS DDR (non-coherent), through
+#                       axi_smc_dma (256-bit @ dp_clk -> 128-bit @ pl_clk3)
+# PLL sources: pl_clk0/1/2 come from the IOPLL (1500 MHz / 15, / 6, / 6), pl_clk3 from the RPLL.
+# The PS clock wizard never exceeds a requested frequency, so it retunes the RPLL to the
+# highest pl_clk3 <= 333 MHz that it can make: 322.19 MHz on the ZCU106 (PSS_REF_CLK
+# 33.330 MHz), 327.77 MHz on the UltraZed-EV (33.333 MHz). With all four on one PLL it would
+# pull dp_clk and src_clk down to 245.8 MHz, hence the explicit SRCSEL.
+# The HP2 request is a variable so that it can be lowered (300, 250) if timing does not close.
+set fdrec_hp2_mhz 333
 set_property -dict [list CONFIG.PSU__FPGA_PL1_ENABLE {1} \
+  CONFIG.PSU__CRL_APB__PL1_REF_CTRL__SRCSEL {IOPLL} \
   CONFIG.PSU__CRL_APB__PL1_REF_CTRL__FREQMHZ {250} \
   CONFIG.PSU__FPGA_PL2_ENABLE {1} \
-  CONFIG.PSU__CRL_APB__PL2_REF_CTRL__FREQMHZ {200} \
+  CONFIG.PSU__CRL_APB__PL2_REF_CTRL__SRCSEL {IOPLL} \
+  CONFIG.PSU__CRL_APB__PL2_REF_CTRL__FREQMHZ {250} \
+  CONFIG.PSU__FPGA_PL3_ENABLE {1} \
+  CONFIG.PSU__CRL_APB__PL3_REF_CTRL__SRCSEL {RPLL} \
+  CONFIG.PSU__CRL_APB__PL3_REF_CTRL__FREQMHZ $fdrec_hp2_mhz \
   CONFIG.PSU__USE__S_AXI_GP4 {1} \
   CONFIG.PSU__SAXIGP4__DATA_WIDTH {128}] [get_bd_cells zynq_ultra_ps_e_0]
 
@@ -423,26 +440,35 @@ if {$dual_design} {
 # FPGA Drive Recorder datapath
 # ##########################################################
 #
-#  user_data_source (src_clk)          fdrec_core                    dp_clk
-#  [fdrec_tpg] --AXIS 128b--> [ingest FIFO -> packetizer] --AXIS--> axi_dma_0 S2MM
-#                                  ^ AXI-Lite regs                    | M_AXI_S2MM + M_AXI_SG
-#                                  |                                  v
-#  M_AXI_HPM0_FPD -> periph_intercon_0 -+-> fdrec_core/S_AXI     axi_smc_dma -> S_AXI_HP2_FPD
-#                                       +-> axi_dma_0/S_AXI_LITE
+#  user_data_source (src_clk 250)      fdrec_core                     dp_clk 250
+#  [fdrec_tpg] --AXIS 256b--> [ingest FIFO -> packetizer] --AXIS 256b--> axi_dma_0 S2MM
+#                                  ^ AXI-Lite regs                         | M_AXI_S2MM 256b + M_AXI_SG
+#                                  |                                       v
+#  M_AXI_HPM0_FPD -> periph_intercon_0 -+-> fdrec_core/S_AXI      axi_smc_dma (256b @ dp_clk
+#                                       +-> axi_dma_0/S_AXI_LITE    -> 128b @ pl_clk3 333)
+#                                                                  -> S_AXI_HP2_FPD (~5.2 GB/s)
 #
-# Playback (register map 1.1):
+# Playback:
 #
-#  axi_dma_0 MM2S --AXIS 128b (dp_clk)--> fdrec_core [egress FIFO] --AXIS (src_clk)-->
-#  user_data_sink [fdrec_check]   (M_AXI_MM2S -> axi_smc_dma -> S_AXI_HP2_FPD)
+#  axi_dma_0 MM2S --AXIS 256b (dp_clk)--> fdrec_core [egress FIFO] --AXIS 256b (src_clk)-->
+#  user_data_sink [fdrec_check]   (M_AXI_MM2S 256b -> axi_smc_dma -> S_AXI_HP2_FPD)
+#
+# Datapath width: fdrec_data_width (256) on fdrec_tpg, fdrec_core and fdrec_check;
+# 256 bits x 250 MHz = 8.0 GB/s from the source and into the sink. The HP2 port
+# (128 bits x pl_clk3: 5.16 GB/s peak on the ZCU106, 5.24 GB/s on the UltraZed-EV) is the
+# DDR-side ceiling of this family.
 #
 # The user_data_source / user_data_sink hierarchies are the documented
 # insertion points for a customer's own data source / sink (see
 # docs/source/custom_source.md).
 
+set fdrec_data_width 256
+
 # Actual PL clock frequencies (the PS PLLs may not hit the requested values exactly)
 set dp_clk_hz  [expr {int(round([get_property CONFIG.FREQ_HZ [get_bd_pins zynq_ultra_ps_e_0/pl_clk1]]))}]
 set src_clk_hz [expr {int(round([get_property CONFIG.FREQ_HZ [get_bd_pins zynq_ultra_ps_e_0/pl_clk2]]))}]
-puts "INFO: fdrec dp_clk (pl_clk1) = $dp_clk_hz Hz, src_clk (pl_clk2) = $src_clk_hz Hz"
+set hp2_clk_hz [expr {int(round([get_property CONFIG.FREQ_HZ [get_bd_pins zynq_ultra_ps_e_0/pl_clk3]]))}]
+puts "INFO: fdrec dp_clk (pl_clk1) = $dp_clk_hz Hz, src_clk (pl_clk2) = $src_clk_hz Hz, hp2 (pl_clk3) = $hp2_clk_hz Hz, DATA_WIDTH = $fdrec_data_width"
 
 # Resets for the two new clock domains
 create_bd_cell -type ip -vlnv xilinx.com:ip:proc_sys_reset rst_dp_clk
@@ -462,6 +488,7 @@ create_bd_pin -dir I user_data_source/tpg_seq_rst
 create_bd_pin -dir I -from 31 -to 0 user_data_source/tpg_rate_inc
 create_bd_pin -dir O -from 63 -to 0 user_data_source/tpg_seq_next
 create_bd_cell -type module -reference fdrec_tpg user_data_source/fdrec_tpg_0
+set_property CONFIG.DATA_WIDTH $fdrec_data_width [get_bd_cells user_data_source/fdrec_tpg_0]
 connect_bd_net [get_bd_pins user_data_source/src_clk] [get_bd_pins user_data_source/fdrec_tpg_0/src_clk]
 connect_bd_net [get_bd_pins user_data_source/src_resetn] [get_bd_pins user_data_source/fdrec_tpg_0/src_resetn]
 connect_bd_net [get_bd_pins user_data_source/tpg_enable] [get_bd_pins user_data_source/fdrec_tpg_0/tpg_enable]
@@ -483,6 +510,7 @@ foreach p $chk_counters {
   create_bd_pin -dir O -from 63 -to 0 user_data_sink/$p
 }
 create_bd_cell -type module -reference fdrec_check user_data_sink/fdrec_check_0
+set_property CONFIG.DATA_WIDTH $fdrec_data_width [get_bd_cells user_data_sink/fdrec_check_0]
 foreach p [concat {snk_clk snk_resetn chk_enable chk_reset chk_rate_inc} $chk_counters] {
   connect_bd_net [get_bd_pins user_data_sink/$p] [get_bd_pins user_data_sink/fdrec_check_0/$p]
 }
@@ -510,9 +538,10 @@ foreach p $chk_counters {
   create_bd_pin -dir I -from 63 -to 0 fdrec_core/$p
 }
 create_bd_cell -type module -reference fdrec_core fdrec_core/fdrec_core_0
-set_property -dict [list CONFIG.SRC_CLK_HZ $src_clk_hz \
+set_property -dict [list CONFIG.DATA_WIDTH $fdrec_data_width \
+  CONFIG.SRC_CLK_HZ $src_clk_hz \
   CONFIG.DP_CLK_HZ $dp_clk_hz \
-  CONFIG.FIFO_DEPTH {16384} \
+  CONFIG.FIFO_DEPTH {8192} \
   CONFIG.EGR_FIFO_DEPTH {4096}] [get_bd_cells fdrec_core/fdrec_core_0]
 foreach p [concat {src_clk src_resetn dp_clk dp_resetn tpg_enable tpg_seq_rst tpg_rate_inc tpg_seq_next \
                    chk_enable chk_reset chk_rate_inc} $chk_counters] {
@@ -536,31 +565,33 @@ foreach p [concat {chk_enable chk_reset chk_rate_inc} $chk_counters] {
   connect_bd_net [get_bd_pins fdrec_core/$p] [get_bd_pins user_data_sink/$p]
 }
 
-# AXI DMA: scatter-gather, S2MM (record) + MM2S (playback), 128-bit stream and
-# memory map, burst 256, 26-bit buffer length register, 64-bit addressing (PS
-# DDR above 4 GB boundary is at 0x8_0000_0000), no DRE
+# AXI DMA: scatter-gather, S2MM (record) + MM2S (playback), 256-bit stream and
+# memory map, burst 128 beats (4 KB), 26-bit buffer length register, 64-bit
+# addressing (PS DDR above 4 GB boundary is at 0x8_0000_0000), no DRE
 create_bd_cell -type ip -vlnv xilinx.com:ip:axi_dma axi_dma_0
 set_property -dict [list CONFIG.c_include_sg {1} \
   CONFIG.c_include_mm2s {1} \
-  CONFIG.c_m_axi_mm2s_data_width {128} \
-  CONFIG.c_m_axis_mm2s_tdata_width {128} \
-  CONFIG.c_mm2s_burst_size {256} \
+  CONFIG.c_m_axi_mm2s_data_width $fdrec_data_width \
+  CONFIG.c_m_axis_mm2s_tdata_width $fdrec_data_width \
+  CONFIG.c_mm2s_burst_size {128} \
   CONFIG.c_include_mm2s_dre {0} \
   CONFIG.c_include_s2mm {1} \
   CONFIG.c_micro_dma {0} \
   CONFIG.c_sg_length_width {26} \
   CONFIG.c_sg_include_stscntrl_strm {0} \
   CONFIG.c_addr_width {64} \
-  CONFIG.c_s_axis_s2mm_tdata_width {128} \
-  CONFIG.c_m_axi_s2mm_data_width {128} \
-  CONFIG.c_s2mm_burst_size {256} \
+  CONFIG.c_s_axis_s2mm_tdata_width $fdrec_data_width \
+  CONFIG.c_m_axi_s2mm_data_width $fdrec_data_width \
+  CONFIG.c_s2mm_burst_size {128} \
   CONFIG.c_include_s2mm_dre {0}] [get_bd_cells axi_dma_0]
 connect_bd_intf_net [get_bd_intf_pins fdrec_core/M_AXIS] [get_bd_intf_pins axi_dma_0/S_AXIS_S2MM]
 connect_bd_intf_net [get_bd_intf_pins axi_dma_0/M_AXIS_MM2S] [get_bd_intf_pins fdrec_core/S_AXIS_MM2S]
 
-# DMA masters -> SmartConnect -> S_AXI_HP2_FPD
+# DMA masters -> SmartConnect -> S_AXI_HP2_FPD. Two clocks: aclk = dp_clk (the
+# DMA side, 256 bits), aclk1 = pl_clk3 (the HP2 side, 128 bits); the
+# SmartConnect does the width and clock conversion.
 create_bd_cell -type ip -vlnv xilinx.com:ip:smartconnect axi_smc_dma
-set_property -dict [list CONFIG.NUM_SI {3} CONFIG.NUM_MI {1}] [get_bd_cells axi_smc_dma]
+set_property -dict [list CONFIG.NUM_SI {3} CONFIG.NUM_MI {1} CONFIG.NUM_CLKS {2}] [get_bd_cells axi_smc_dma]
 connect_bd_intf_net [get_bd_intf_pins axi_dma_0/M_AXI_SG] [get_bd_intf_pins axi_smc_dma/S00_AXI]
 connect_bd_intf_net [get_bd_intf_pins axi_dma_0/M_AXI_S2MM] [get_bd_intf_pins axi_smc_dma/S01_AXI]
 connect_bd_intf_net [get_bd_intf_pins axi_dma_0/M_AXI_MM2S] [get_bd_intf_pins axi_smc_dma/S02_AXI]
@@ -574,9 +605,13 @@ set_property CONFIG.NUM_MI [expr {$n_mi + 2}] [get_bd_cells periph_intercon_0]
 connect_bd_intf_net [get_bd_intf_pins periph_intercon_0/${mi_regs}_AXI] [get_bd_intf_pins fdrec_core/S_AXI]
 connect_bd_intf_net [get_bd_intf_pins periph_intercon_0/${mi_dma}_AXI] [get_bd_intf_pins axi_dma_0/S_AXI_LITE]
 
+# HP2 clock: S_AXI_HP2_FPD and the SmartConnect's master side only
+connect_bd_net [get_bd_pins zynq_ultra_ps_e_0/pl_clk3] \
+  [get_bd_pins zynq_ultra_ps_e_0/saxihp2_fpd_aclk] \
+  [get_bd_pins axi_smc_dma/aclk1]
+
 # dp_clk domain clocks and resets
 connect_bd_net [get_bd_pins zynq_ultra_ps_e_0/pl_clk1] \
-  [get_bd_pins zynq_ultra_ps_e_0/saxihp2_fpd_aclk] \
   [get_bd_pins axi_smc_dma/aclk] \
   [get_bd_pins axi_dma_0/s_axi_lite_aclk] \
   [get_bd_pins axi_dma_0/m_axi_sg_aclk] \
@@ -632,6 +667,16 @@ foreach as {Data_SG Data_S2MM Data_MM2S} {
 }
 
 validate_bd_design
+
+# The recorder's DMA path after parameter propagation: widths and clocks of the
+# SmartConnect's two sides (it must have both clocks: dp_clk and pl_clk3)
+foreach ip {axi_smc_dma/S01_AXI axi_smc_dma/S02_AXI axi_smc_dma/M00_AXI zynq_ultra_ps_e_0/S_AXI_HP2_FPD} {
+  set ipin [get_bd_intf_pins $ip]
+  puts "INFO: fdrec $ip DATA_WIDTH [get_property CONFIG.DATA_WIDTH $ipin] FREQ_HZ [get_property CONFIG.FREQ_HZ $ipin]"
+}
+foreach clk {aclk aclk1} {
+  puts "INFO: fdrec axi_smc_dma/$clk <- [get_bd_nets -of_objects [get_bd_pins axi_smc_dma/$clk]]"
+}
 
 # Restore current instance
 current_bd_instance $oldCurInst

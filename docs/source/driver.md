@@ -1,16 +1,39 @@
 # Kernel driver
 
-The `fdrec` kernel module (`sw/fdrec-driver/`) connects the recorder hardware to user space.
-It drives the `fdrec_core` register block (test pattern generator, ingest FIFO, packetizer,
-and from register map 1.1 the playback checker and egress FIFO) and the S2MM (record) and
-MM2S (playback) channels of the AMD AXI DMA, through the standard `xilinx_dma` dmaengine
-driver of the kernel. The image built by the Yocto flow loads it at boot; it binds to the
-`compatible = "opsero,fdrec"` device-tree node and creates `/dev/fdrec0`.
+The `fdrec` kernel module (`sw/fdrec-driver/`, version 1.3) connects the recorder hardware
+to user space. It drives the `fdrec_core` register block (test pattern generator, ingest
+FIFO, packetizer, and from register map 1.1 the playback checker and egress FIFO) and the
+S2MM (record) and MM2S (playback) channels of the AMD AXI DMA, through the standard
+`xilinx_dma` dmaengine driver of the kernel. The image built by the Yocto flow loads it at
+boot; it binds to the `compatible = "opsero,fdrec"` device-tree node and creates
+`/dev/fdrec0`.
 
 The user-space API is defined in [`include/fdrec_uapi.h`](https://github.com/fpgadeveloper/fpga-drive-recorder/blob/dev/include/fdrec_uapi.h),
 which is shared by the driver and the apps. The register map is in
 [`include/fdrec_regs.h`](https://github.com/fpgadeveloper/fpga-drive-recorder/blob/dev/include/fdrec_regs.h)
 (see [Register map](register_map)).
+
+## Beats and words
+
+The fabric datapath is 256 bits wide on the reference designs (the `DATA_WIDTH` parameter
+of the `fdrec_*` modules; 128 is the other supported width). At probe the driver reads the
+**beat size** from the `BEAT_BYTES` register (register map 1.2): 32 bytes on a 256-bit
+datapath. On register maps 1.0 and 1.1, whose datapath is 128 bits, the register reads 0
+and the driver uses 16. A value that is not a power of 2 from 16 to 128 makes the probe
+fail. The driver reports the beat size in `fdrec_info.beat_bytes`, in the `beat_bytes`
+sysfs attribute and in its probe message, and uses it for every conversion between bytes
+and beats: `PKT_LEN`, the generator and sink rates, the length check of `PLAY_SUBMIT` and
+the egress FIFO priming.
+
+Two units appear in the counters:
+
+* **Beats** (fabric beats of `beat_bytes` bytes): every beat counter (`drop_count`,
+  `beats_in`, `beats_out`, the `chk_*` counts, the `egr_*` counts), the FIFO depths, levels
+  and high-water marks, and `PKT_LEN`.
+* **Words** (16-byte test-pattern words): the sequence numbers, `seq_next` (`TPG_SEQ_NEXT`)
+  and `chk_last_seq` (`CHK_LAST_SEQ`). A 32-byte beat carries two consecutive words, so the
+  sequence number of its word 0 advances by two per beat. Recordings are therefore
+  byte-identical whatever the datapath width (see [File format](file_format)).
 
 ## Buffer model
 
@@ -37,7 +60,8 @@ User space owns the memory and the driver pins it:
    `FOLL_WRITE | FOLL_LONGTERM`), builds an `sg_table` per buffer and maps it with
    `dma_map_sgtable(..., DMA_FROM_DEVICE)` against the DMA channel's device.
 3. `FDREC_IOC_START` resets the datapath (`GLOBAL_CTRL.SOFT_RST`: FIFO flushed, counters
-   cleared), sets `PKT_LEN = buffer_size / 16`, puts every buffer in the driver's DMA queue
+   cleared), sets `PKT_LEN = buffer_size / beat_bytes` (262 144 beats for an 8 MB buffer of
+   32-byte beats), puts every buffer in the driver's DMA queue
    and submits the first three as `dmaengine_prep_slave_sg` descriptors with a completion
    callback (the first starts the DMA, the other two are appended to its descriptor chain;
    each completion appends the next queued buffer, see below), then enables the packetizer
@@ -110,8 +134,8 @@ by the CPU.
    buffer descriptor.
 4. `FDREC_IOC_PLAY_WAIT_DONE` returns the next buffer the DMA has finished reading; the app
    refills it. Done means the DMA has read it -- its last beats may still be in the egress
-   FIFO (`EGR_FIFO_DEPTH` beats, 4096 = 64 KB in the reference design) on their way to the
-   sink.
+   FIFO (`EGR_FIFO_DEPTH` beats, 4096 × 32 B = 128 KB in the reference designs) on their way
+   to the sink.
 5. `FDREC_IOC_PLAY_STOP` returns the counters, stops feeding, sets `EGR_CTRL.FLUSH` if the
    DMA still owns buffers (the egress FIFO then accepts and discards everything, so the at
    most three in-flight descriptors complete within microseconds whatever the sink does),
@@ -151,10 +175,11 @@ written by the NVMe controller (the app's `O_DIRECT` read: the NVMe driver maps 
 | Device | `/dev/fdrec0` (misc device; one opener at a time, a second `open` gets `EBUSY`) |
 | Device tree | `compatible = "opsero,fdrec"`, `reg` = the 4 KB fdrec register block, `dmas = <&axi_dma_0 1>, <&axi_dma_0 0>`, `dma-names = "rx", "tx"` (`xilinx_dma` numbers an AXI DMA's channels 0 = MM2S, 1 = S2MM). `"tx"` is optional: without it the driver probes record-only |
 | Capabilities | `fdrec_info.caps`: `FDREC_CAP_TPG`, `FDREC_CAP_S2MM`; `FDREC_CAP_MM2S` when the `"tx"` channel exists; `FDREC_CAP_CHECK` when `VERSION` ≥ 1.1 (checker and egress registers) |
-| Buffers | 2 to 64 per open file; size a multiple of 2 MB, at most 62 MB (`PKT_LEN` ≤ 2^22 - 1 beats); each buffer 2 MB aligned |
+| Buffers | 2 to 64 per open file; size a multiple of 2 MB, at most 62 MB (every buffer is one packet: `PKT_LEN` ≤ 2^22 - 1 beats, and the AXI DMA's 26-bit length limits a packet to 64 MB - 1 bytes); each buffer 2 MB aligned |
+| Beat size | `BEAT_BYTES` register: 32 bytes on the 256-bit reference designs; 16 when the register reads 0 (register map 1.0 / 1.1, 128-bit datapath). The probe fails on any other value than a power of 2 from 16 to 128 |
 | DMA descriptors | all registered buffers together may need at most 511 AXI DMA buffer descriptors (one per physically contiguous run of up to 64 MB - 1; the default 32 × 8 MB of hugepages needs at most 128) |
 | Module parameters | `stop_drain_ms` (default 5000, writable at `/sys/module/fdrec/parameters/stop_drain_ms`): the longest time `STOP` / `PLAY_STOP` waits for the buffers the DMA still owns to complete before it terminates the channel anyway (see below). `dma_irq_cpu` (default -1): the CPU the AXI DMA channel interrupts are pinned to at probe: -1 = the last online CPU, -2 = leave the affinity alone, ≥ 0 = that CPU (see "Interrupt CPU", below) |
-| Kernel log at probe | `fdrec <addr>.fdrec_core: /dev/fdrec0: fdrec_core v1.1, src_clk … Hz, dp_clk … Hz, FIFO 16384 beats, DMA rx dma0chan1 tx dma0chan0 (max segment 67108863 bytes), checker`, preceded by one `dma-channel: IRQ <n> -> CPU<c>` line per AXI DMA channel (`dma_irq_cpu`); without a `"tx"` channel: `no DMA channel "tx" (…): record only` |
+| Kernel log at probe | `fdrec <addr>.fdrec_core: /dev/fdrec0: fdrec_core v1.2, src_clk … Hz, dp_clk … Hz, beat 32 bytes, FIFO 8192 beats, DMA rx dma0chan1 tx dma0chan0 (max segment 67108863 bytes), checker`, preceded by one `dma-channel: IRQ <n> -> CPU<c>` line per AXI DMA channel (`dma_irq_cpu`); without a `"tx"` channel: `no DMA channel "tx" (…): record only`. `modinfo fdrec` shows `version: 1.3` |
 | Addressing | the buffers must be directly addressable by the AXI DMA (no swiotlb bouncing): the driver refuses a buffer whose DMA address differs from its physical address. The design's AXI DMA uses 64-bit addressing, so all of PS DDR is reachable |
 
 ## ioctl reference
@@ -164,16 +189,16 @@ for 32-bit and 64-bit user space).
 
 | ioctl | Argument | Description |
 |-------|----------|-------------|
-| `FDREC_IOC_GET_INFO` | `struct fdrec_info` (out) | API version, `VERSION` register, `SRC_CLK_HZ`, `DP_CLK_HZ`, beat size (16), FIFO depth, buffer limits, the AXI DMA's maximum segment length |
+| `FDREC_IOC_GET_INFO` | `struct fdrec_info` (out) | API version, `VERSION` register, `SRC_CLK_HZ`, `DP_CLK_HZ`, beat size (`beat_bytes`: 32 on a 256-bit datapath, 16 on a 128-bit one), ingest FIFO depth in beats, buffer limits, the AXI DMA's maximum segment length |
 | `FDREC_IOC_REGISTER_BUFS` | `struct fdrec_bufs` (in) | Pin and map `count` buffers of `buf_size` bytes whose user addresses are in the `__u64` array `addrs`. Replaces any previous set; `count = 0` unregisters. Only while stopped and with no buffer held by user space (`EBUSY`) |
 | `FDREC_IOC_START` | `struct fdrec_start` (in/out) | Start recording. `flags`: `FDREC_START_TPG` resets the TPG sequence and enables the TPG once the datapath runs; without it the TPG enable state from before `START` is restored unchanged. Returns `pkt_len`, `first_seq` (0) and `start_time_ns` (`CLOCK_REALTIME` when the packetizer was enabled) |
 | `FDREC_IOC_WAIT_FILLED` | `struct fdrec_filled` (in/out) | Wait up to `timeout_ms` (< 0: forever, 0: poll) for the next filled buffer, in fill order. Returns `index`, `bytes`, `seq` (0, 1, 2, … since `START`), `drop_count` (read when the buffer completed) and `flags` (`FDREC_FILLED_SHORT`: fewer bytes than the buffer size; `FDREC_FILLED_ERROR`: DMA error). Errors: `ETIMEDOUT`, `EINTR`, `ENODATA` (stopped, nothing left), `EIO` (DMA error; the buffer is still returned) |
 | `FDREC_IOC_RELEASE` | `struct fdrec_release` (in) | Return buffer `index` to the driver; it is re-queued while running |
 | `FDREC_IOC_STOP` | `struct fdrec_stats` (out) | Stop and return the final counters. Buffers that were queued or filled but not collected are discarded; buffers user space holds stay held until `RELEASE` |
 | `FDREC_IOC_GET_STATS` | `struct fdrec_stats` (out) | Hardware counters (drop count, beats in/out, TPG sequence, FIFO high-water mark and depth, overflow flag) and buffer accounting (filled, owned by the DMA, ready, held by user space, DMA errors) |
-| `FDREC_IOC_SET_RATE` | `struct fdrec_rate` (in/out) | Program `TPG_RATE_INC` for `rate_bps` bytes/s (clamped to `SRC_CLK_HZ` × 16); returns the rate actually programmed. Does not change the TPG enable |
+| `FDREC_IOC_SET_RATE` | `struct fdrec_rate` (in/out) | Program `TPG_RATE_INC` for `rate_bps` bytes/s (`rate_bps = TPG_RATE_INC / 2^31 × SRC_CLK_HZ × beat_bytes`, clamped to `SRC_CLK_HZ` × `beat_bytes`, 8 GB/s at 250 MHz × 32 B); returns the rate actually programmed. Does not change the TPG enable |
 | `FDREC_IOC_PLAY_START` | `struct fdrec_play_start` (in/out) | Start a playback (needs a `FDREC_DIR_PLAY` set, `FDREC_CAP_MM2S`). `flags`: `FDREC_PLAY_CHECK` = `SOFT_RST`, reset the checker, enable it once the egress FIFO has primed (first `PLAY_SUBMIT`) (`EOPNOTSUPP` without `FDREC_CAP_CHECK`). Returns `start_time_ns` |
-| `FDREC_IOC_PLAY_SUBMIT` | `struct fdrec_play_submit` (in) | Queue buffer `index` with `bytes` bytes (multiple of 16, 1 … buffer size) for the MM2S; played in submission order, one packet per buffer. `EINVAL` bad arguments, `EBUSY` the driver still owns the buffer, `EPIPE` not playing |
+| `FDREC_IOC_PLAY_SUBMIT` | `struct fdrec_play_submit` (in) | Queue buffer `index` with `bytes` bytes (whole beats: a multiple of `beat_bytes`, 1 … buffer size; the egress path ignores `TKEEP`) for the MM2S; played in submission order, one packet per buffer. `EINVAL` bad arguments, `EBUSY` the driver still owns the buffer, `EPIPE` not playing |
 | `FDREC_IOC_PLAY_WAIT_DONE` | `struct fdrec_play_done` (in/out) | Wait up to `timeout_ms` for the next buffer the DMA has finished reading. Returns `index`, `bytes`, `seq` (0, 1, … since `PLAY_START`), `flags` (`FDREC_DONE_ERROR`). Errors as `WAIT_FILLED` |
 | `FDREC_IOC_PLAY_STOP` | `struct fdrec_play_stats` (out) | Stop the playback (flush, terminate, see above) and return the counters read after the stop (checker frozen, so one coherent set; `egr_discard` includes the flushed beats) |
 | `FDREC_IOC_GET_PLAY_STATS` | `struct fdrec_play_stats` (out) | Buffer accounting (done, bytes, owned by the DMA, ready, DMA errors), the checker counters (`chk.beats/errors/gaps/gap_beats/underflows/last_seq/rate_bps/enabled`) and the egress FIFO (`egr_beats_in`, `egr_discard`, `egr_level`, `egr_depth`) |
@@ -182,7 +207,9 @@ for 32-bit and 64-bit user space).
 **API compatibility.** `FDREC_API_VERSION` is still 1: playback only adds to it -- the
 direction lives in `fdrec_bufs.flags`, which had to be zero before playback existed
 (`FDREC_DIR_RECORD` = 0), and the playback ioctls and capability bits are new. Phase-1 binaries work unchanged; new apps
-check `caps` before using playback.
+check `caps` before using playback. The beat size has been part of `fdrec_info` from the
+start; apps must take it from there (or from the `beat_bytes` attribute) rather than assume
+16 bytes.
 
 The device also supports `poll()`: `POLLIN` when a filled (playback: finished) buffer is
 waiting (`WAIT_FILLED` / `PLAY_WAIT_DONE` will not block), `POLLHUP` once stopped with nothing
@@ -218,24 +245,25 @@ recording runs (for scripting and monitoring) and while the device is closed.
 |-----------|--------|-------------|
 | `rate_bps` | rw | TPG rate in bytes/s; writing programs `TPG_RATE_INC` (rounded), reading returns the programmed rate |
 | `tpg_enable` | rw | TPG enable (`TPG_CTRL.ENABLE`), `0` / `1` |
+| `beat_bytes` | ro | Bytes per fabric beat (`BEAT_BYTES`; 16 when the register reads 0). The unit of every beat counter below |
 | `drop_count` | ro | Beats dropped at the ingest FIFO (64-bit) |
 | `overflow` | rw | Sticky overflow flag; write `1` to clear |
 | `beats_in` | ro | Beats offered by the source (64-bit) |
 | `beats_out` | ro | Beats delivered to the DMA (64-bit) |
 | `fifo_hwm` | rw | Ingest FIFO high-water mark in beats; any write clears it |
 | `fifo_depth` | ro | Ingest FIFO depth in beats |
-| `seq_next` | ro | Next TPG sequence number |
+| `seq_next` | ro | Sequence number (in 16-byte words) of word 0 of the next beat the TPG emits |
 | `src_clk_hz` | ro | Source clock frequency |
 | `dp_clk_hz` | ro | Datapath clock frequency |
-| `version` | ro | `fdrec_core` register map version, e.g. `1.1` |
+| `version` | ro | `fdrec_core` register map version, e.g. `1.2` |
 | `chk_enable` | rw | Checker enable (`CHK_CTRL.ENABLE`): `1` / `0` (counters keep their values); writing `reset` clears the counters and the expected sequence number and keeps the enable state. While disabled the checker holds TREADY low (the stream stalls) |
-| `chk_rate_bps` | rw | Sink consumption rate in bytes/s (`CHK_RATE_INC`, default = every clock = `SRC_CLK_HZ` × 16); `0` is refused |
+| `chk_rate_bps` | rw | Sink consumption rate in bytes/s (`CHK_RATE_INC`, default = every clock = `SRC_CLK_HZ` × `beat_bytes`, 8 GB/s at 250 MHz × 32 B); `0` is refused |
 | `chk_beats` | ro | Beats accepted by the checker |
-| `chk_errors` | ro | Beats failing the pattern check, plus sequence numbers going backwards |
+| `chk_errors` | ro | Bad beats (a word failing the pattern check, or a word out of sequence within the beat), plus beats whose sequence number went backwards |
 | `chk_gaps` | ro | Sequence discontinuities |
-| `chk_gap_beats` | ro | Missing sequence numbers in total (= the recording's `drop_count` for a TPG file) |
+| `chk_gap_beats` | ro | Missing beats in total (= the recording's `drop_count` for a TPG file recorded with the same beat size) |
 | `chk_underflows` | ro | Sink cycles that found no data after the first beat (only ticks followed by more data count) |
-| `chk_last_seq` | ro | Sequence number of the last good beat |
+| `chk_last_seq` | ro | Sequence number (in 16-byte words) of word 0 of the last good beat |
 | `egr_beats_in` | ro | Beats written into the egress FIFO |
 | `egr_discard` | ro | Beats discarded by `EGR_CTRL.FLUSH` (`PLAY_STOP` of a running playback) |
 | `egr_fifo_level` | ro | Egress FIFO occupancy in beats |
@@ -248,7 +276,7 @@ describe that recording. Example:
 
 ```
 echo 1000000000 > /sys/class/misc/fdrec0/rate_bps    # 1 GB/s
-cat /sys/class/misc/fdrec0/{drop_count,fifo_hwm,fifo_depth}
+cat /sys/class/misc/fdrec0/{beat_bytes,drop_count,fifo_hwm,fifo_depth}
 ```
 
 ## Interaction with the `xilinx_dma` driver
@@ -278,7 +306,7 @@ driver shape how it does that:
   time, so the first one starts the idle channel with interrupt threshold 1 and the others
   are appended: one interrupt per buffer, and every buffer reaches user space as soon as it
   is full. The completion callback submits the next buffer from the driver's queue, which is
-  appended behind the other two; it has two buffer periods (5.2 ms at 3.2 GB/s with 8 MiB
+  appended behind the other two; it has two buffer periods (2.1 ms at 8 GB/s with 8 MiB
   buffers) to do so before the engine reaches the end of the chain. (Handing `xilinx_dma`
   every free buffer at once would start them as one batch: one interrupt per batch, no
   buffer visible to user space until the whole batch is full, and the patch appends only
@@ -352,7 +380,7 @@ The design targets the AMD EDF 2025.2 kernel, **6.12.40-xilinx** (linux-xlnx tag
 | Fact | Where (6.12.40-xilinx) |
 |------|------------------------|
 | `xlnx,sg-length-width` is honoured for AXI DMA up to 26 bits (`XILINX_DMA_V2_MAX_TRANS_LEN_MAX`); without it the length field is 23 bits. `max_buffer_len = GENMASK(width - 1, 0)` | `drivers/dma/xilinx/xilinx_dma.c:174-176`, `:3097-3113` |
-| `prep_slave_sg` splits a scatterlist entry longer than `max_buffer_len` into several BDs itself (`xilinx_dma_calc_copysize`, keeping the `copy_align` of the 128-bit data width = 16 bytes) | `xilinx_dma.c:2183-2240`, `:1240-1258`, `:2846-2858` |
+| `prep_slave_sg` splits a scatterlist entry longer than `max_buffer_len` into several BDs itself (`xilinx_dma_calc_copysize`, keeping the `copy_align` of the channel's stream width `xlnx,datawidth` when the DMA has no DRE, which it never has above 64 bits: 32 bytes at 256 bits, 16 at 128) | `xilinx_dma.c:2183-2240`, `:1240-1258`, `:2846-2858` |
 | 512 BDs per channel (`XILINX_DMA_NUM_DESCS`), allocated once per channel allocation in a ring with fixed next-pointers | `xilinx_dma.c:186`, `:1113-1166` |
 | A descriptor completes only when its **last** BD has the Cmplt bit; the residue is the sum over its BDs of `(control - status) & max_buffer_len`, passed to `callback_result` as `result.residue` | `xilinx_dma.c:1712-1742`, `:980-1021`, `:1047-1078` |
 | Consequence for TLAST: a packet that ends exactly on the last BD of a descriptor completes that descriptor with residue 0. A TLAST inside a descriptor would leave its remaining BDs to the next packet, which is why `PKT_LEN` must equal the buffer size | same |

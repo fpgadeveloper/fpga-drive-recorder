@@ -66,8 +66,10 @@
 #define FDREC_BUF_ALIGN                 (2u * 1024 * 1024)  /* 2 MB: hugepage size */
 #define FDREC_MAX_BUFS                  64                  /* per open file */
 /* Largest buffer: 62 MB. Every buffer is one AXI-Stream packet of
- * buf_size / 16 beats, and the packetizer accepts PKT_LEN <= 4194303
- * (2^22 - 1) beats; 62 MB is the largest 2 MB multiple below that. */
+ * buf_size / beat_bytes beats; the packetizer accepts PKT_LEN <= 4194303
+ * (2^22 - 1) beats, and the AXI DMA's 26-bit length limits a packet to
+ * 64 MB - 1 bytes; 62 MB is the largest 2 MB multiple within both limits
+ * for 16- and 32-byte beats. */
 #define FDREC_MAX_PKT_LEN               4194303u
 #define FDREC_MAX_BUF_SIZE              (62ull << 20)
 
@@ -85,7 +87,10 @@ struct fdrec_info {
 	__u32 hw_version;       /* VERSION register: [31:16] major, [15:0] minor */
 	__u64 src_clk_hz;       /* SRC_CLK_HZ register */
 	__u64 dp_clk_hz;        /* DP_CLK_HZ register */
-	__u32 beat_bytes;       /* bytes per AXI-Stream beat (16) */
+	__u32 beat_bytes;       /* bytes per fabric beat: BEAT_BYTES register
+				 * (32 on a 256-bit datapath), 16 when it reads
+				 * 0 (register map < 1.2, 128-bit datapath).
+				 * Every beat count below is in these beats. */
 	__u32 fifo_depth;       /* ingest FIFO depth in beats */
 	__u32 max_bufs;         /* FDREC_MAX_BUFS */
 	__u32 caps;             /* FDREC_CAP_* */
@@ -126,15 +131,16 @@ struct fdrec_bufs {
 
 /*
  * FDREC_IOC_START: GLOBAL_CTRL.SOFT_RST (flush FIFO, clear counters), set
- * PKT_LEN = buf_size / 16, queue every registered buffer to the DMA, enable
- * the packetizer, then the TPG as selected by flags.
+ * PKT_LEN = buf_size / beat_bytes, queue every registered buffer to the DMA,
+ * enable the packetizer, then the TPG as selected by flags.
  */
 struct fdrec_start {
 	__u32 flags;            /* in: FDREC_START_* */
 	__u32 pkt_len;          /* out: PKT_LEN programmed (beats per buffer) */
-	__u64 first_seq;        /* out: TPG sequence number of the first beat
-				 *      recorded when the TPG is the source (0:
-				 *      SOFT_RST clears the sequence counter) */
+	__u64 first_seq;        /* out: TPG sequence number (of word 0) of the
+				 *      first beat recorded when the TPG is the
+				 *      source (0: SOFT_RST clears the sequence
+				 *      counter) */
 	__u64 start_time_ns;    /* out: CLOCK_REALTIME when the packetizer was enabled */
 	__u64 reserved[3];
 };
@@ -155,7 +161,7 @@ struct fdrec_filled {
 	__u32 index;            /* out: buffer index */
 	__u64 bytes;            /* out: bytes written by the DMA (buf_size unless SHORT) */
 	__u64 seq;              /* out: fill sequence number (0, 1, 2, ... since START) */
-	__u64 drop_count;       /* out: ING_DROP_COUNT read when the buffer completed */
+	__u64 drop_count;       /* out: ING_DROP_COUNT (beats) read when the buffer completed */
 	__u32 flags;            /* out: FDREC_FILLED_* */
 	__u32 reserved0;
 	__u64 reserved[2];
@@ -173,7 +179,8 @@ struct fdrec_stats {
 	__u64 drop_count;       /* ING_DROP_COUNT: beats dropped at the ingest FIFO */
 	__u64 beats_in;         /* ING_BEATS_IN: beats offered by the source */
 	__u64 beats_out;        /* PKT_BEATS_OUT: beats delivered to the DMA */
-	__u64 seq_next;         /* TPG_SEQ_NEXT */
+	__u64 seq_next;         /* TPG_SEQ_NEXT (16-byte words: seq of word 0 of
+				 * the next beat) */
 	__u32 fifo_hwm;         /* ING_FIFO_HWM (beats) */
 	__u32 fifo_depth;       /* ING_FIFO_DEPTH (beats) */
 	__u32 overflow;         /* ING_STATUS.OVERFLOW (sticky) */
@@ -221,7 +228,8 @@ struct fdrec_play_start {
 
 /*
  * FDREC_IOC_PLAY_SUBMIT: the app has filled buffer index with bytes bytes of
- * beats (multiple of 16, 1..buf_size); the driver cleans the cache over the
+ * beats (a multiple of beat_bytes, 1..buf_size: whole fabric beats, the
+ * egress path ignores TKEEP); the driver cleans the cache over the
  * buffer (dma_sync_sgtable_for_device(DMA_TO_DEVICE)) and queues it to the
  * MM2S channel as one packet, TLAST on its last beat. Buffers are played in
  * submission order. The buffer belongs to the driver until PLAY_WAIT_DONE
@@ -253,14 +261,18 @@ struct fdrec_play_done {
 	__u64 reserved[2];
 };
 
-/* Checker (fdrec_check) counters, FDREC_CAP_CHECK. All 0 without the checker. */
+/* Checker (fdrec_check) counters, FDREC_CAP_CHECK. All 0 without the checker.
+ * Counts are in fabric beats (fdrec_info.beat_bytes); last_seq is in 16-byte
+ * pattern words. */
 struct fdrec_chk_stats {
 	__u64 beats;            /* CHK_BEATS: beats accepted by the sink */
-	__u64 errors;           /* CHK_ERRORS: beats with upper != ~lower */
+	__u64 errors;           /* CHK_ERRORS: bad beats (a word with upper !=
+				 * ~lower, or out of sequence within the beat)
+				 * plus beats whose seq went backwards */
 	__u64 gaps;             /* CHK_GAPS: sequence discontinuities */
-	__u64 gap_beats;        /* CHK_GAP_BEATS: missing sequence numbers in total */
+	__u64 gap_beats;        /* CHK_GAP_BEATS: missing beats in total */
 	__u64 underflows;       /* CHK_UNDERFLOWS: sink ticks with no data (after the first beat) */
-	__u64 last_seq;         /* CHK_LAST_SEQ: sequence number of the last beat */
+	__u64 last_seq;         /* CHK_LAST_SEQ: sequence number of word 0 of the last good beat */
 	__u64 rate_bps;         /* sink throttle (CHK_RATE_INC) in bytes/s */
 	__u32 enabled;          /* CHK_CTRL.ENABLE */
 	__u32 reserved0;

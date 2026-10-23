@@ -61,19 +61,25 @@ Example output (representative):
 ```none
 fdrec 420010000.fdrec_core: dma-channel: IRQ 74 -> CPU3
 fdrec 420010000.fdrec_core: dma-channel: IRQ 75 -> CPU3
-fdrec 420010000.fdrec_core: /dev/fdrec0: fdrec_core v1.1, src_clk 199998001 Hz, dp_clk 249997498 Hz, FIFO 16384 beats, DMA rx dma0chan1 tx dma0chan0 (max segment 67108863 bytes), checker
+fdrec 420010000.fdrec_core: /dev/fdrec0: fdrec_core v1.2, src_clk 249975021 Hz, dp_clk 249975021 Hz, beat 32 bytes, FIFO 8192 beats, DMA rx dma0chan1 tx dma0chan0 (max segment 67108863 bytes), checker
 ```
 
 The `dma-channel` lines give the CPU each AXI DMA channel interrupt was pinned to (the
-`dma_irq_cpu` module parameter, see [Kernel driver](driver.md)). The last line gives the register map version (1.1: record and playback), the actual source and
-datapath clock frequencies, the ingest FIFO depth, the two DMA channels (`rx` = record,
-`tx` = playback) and `checker` when the playback checker is present. Then check the device,
-its sysfs attributes and the hugepage pool that the buffers come from:
+`dma_irq_cpu` module parameter, see [Kernel driver](driver.md)). The last line gives the
+version of the hardware's register map (`fdrec_core v1.2`: record and playback, with the
+beat size in a register), the actual source and datapath clock frequencies, the size of a
+fabric beat (32 bytes: the 256-bit datapath), the ingest FIFO depth in beats, the two DMA
+channels (`rx` = record, `tx` = playback) and `checker` when the playback checker is present.
+`v1.2` is the register map, not the driver: `modinfo -F version fdrec` gives the driver's
+version, 1.3. Then check the device, its sysfs attributes and the hugepage pool that the
+buffers come from:
 
 ```
 ls -l /dev/fdrec0
-cat /sys/class/misc/fdrec0/version          # 1.1
+cat /sys/class/misc/fdrec0/version          # 1.2 (register map)
+cat /sys/class/misc/fdrec0/beat_bytes       # 32
 cat /sys/class/misc/fdrec0/src_clk_hz
+modinfo -F version fdrec                    # 1.3 (driver)
 grep HugePages_ /proc/meminfo               # HugePages_Total: 256
 ```
 
@@ -120,8 +126,8 @@ Example output (representative):
 ```none
 Single SSD Write:
   - Data:  4000 MBytes
-  - Delay: 4.08 seconds
-  - Speed: 980 MBytes/s
+  - Delay: 3.13 seconds
+  - Speed: 1277 MBytes/s
 ```
 
 The dual scripts run one `dd` per SSD in parallel and need each SSD mounted on its own,
@@ -163,11 +169,11 @@ While it runs, `fdrec` prints a live statistics line every second, then a summar
 Example output (representative):
 
 ```none
-fdrec: recording to /mnt/rec/test.dat (32 x 8 MB buffers, qd 8, fixed buffers, test pattern) -- Ctrl-C to stop
-     10.0s   1000.1 MB/s (avg   999.9)       10.000 GB  inflight  2  fifo_hwm     1/16384  drops 0
-fdrec: /mnt/rec/test.dat: 10737418240 bytes (1280 buffers) in 10.74 s, 1000.0 MB/s
-fdrec: dropped beats 0 (at stop: 0), FIFO high-water 1 of 16384 beats, max writes in flight 8
-RESULT bytes=10737418240 seconds=10.737 rate_bps=1000000000 drops=0 fifo_hwm=1 fifo_depth=16384 error=0
+fdrec: recording to /mnt/rec/test.dat (32 x 8 MB buffers, qd 8, fixed buffers, 32-byte beats, test pattern) -- Ctrl-C to stop
+     10.0s   1000.1 MB/s (avg   999.9)       10.000 GB  inflight  2  fifo_hwm     1/8192  drops 0
+fdrec: /mnt/rec/test.dat: 10737418240 bytes (1280 buffers) in 10.75 s, 999.1 MB/s
+fdrec: dropped beats 0 (at stop: 0), FIFO high-water 1 of 8192 beats (32 bytes each), max writes in flight 3
+RESULT bytes=10737418240 seconds=10.747 rate_bps=999999997 drops=0 fifo_hwm=1 fifo_depth=8192 error=0 beat_bytes=32 no_write=0
 exit code 0
 ```
 
@@ -177,29 +183,32 @@ exit code 0
 | 2 | Beats were dropped: the SSD could not keep up with the rate; the recording is not valid |
 | 1 | Error, or a stall: nothing completed for `--timeout` seconds (default 10) |
 
-Verify every beat of the recording:
+Verify the recording:
 
 ```
 sudo fdverify /mnt/rec/test.dat; echo "exit code $?"
 ```
 
-`fdverify` prints the header, then checks the data (a progress line is shown while it
-reads) and ends with `RESULT PASS` and exit code 0 for a clean recording:
+`fdverify` prints the header, then checks every 16-byte word of the test pattern (a 32-byte
+beat holds two; a progress line is shown while it reads) and ends with `RESULT PASS` and exit
+code 0 for a clean recording:
 
-Example output (representative):
+Example output (representative, the end of the header and the result):
 
 ```none
-  beats           671088640 (10737418240 bytes)
+  header          version 1, 4096 bytes, 32-byte beats
+  ...
+  words           671088640 (10737418240 bytes, 335544320 beats of 32 bytes)
   first sequence  0
   last sequence   671088639
-  discontinuities 0, beats missing 0
-  corrupted beats 0
+  discontinuities 0, words missing 0 (0 beats)
+  corrupted words 0
 RESULT PASS
 exit code 0
 ```
 
 Play the recording back into the fabric, where the hardware checker consumes it at 1 GB/s
-and checks every beat:
+and checks both words of every beat:
 
 ```
 sudo fdplay --rate 1000MB /mnt/rec/test.dat; echo "exit code $?"
@@ -208,11 +217,14 @@ sudo fdplay --rate 1000MB /mnt/rec/test.dat; echo "exit code $?"
 Example output (representative):
 
 ```none
-fdplay: /mnt/rec/test.dat: 10737418240 of 10737418240 bytes (1280 buffers) in 10.78 s, 996.1 MB/s
-fdplay: checker: beats 671088640 (expected 671088640), errors 0, gaps 0, gap beats 0 (recording drop_count 0), underflows 0, last seq 671088639, sink rate 1000.0 MB/s
-RESULT bytes=10737418240 seconds=10.780 sink_rate_bps=1000000000 beats=671088640 errors=0 gaps=0 gap_beats=0 drop_count=0 underflows=0 egr_discard=0 max_reads=8 complete=1 error=0
+fdplay: /mnt/rec/test.dat: 10737418240 of 10737418240 bytes (1280 buffers) in 10.83 s, 991.8 MB/s
+fdplay: checker: beats 335544320 (expected 335544320, 32 bytes each), errors 0, gaps 0, gap beats 0 (recording drop_count 0), underflows 0, last seq 671088638, sink rate 1000.0 MB/s
+RESULT bytes=10737418240 seconds=10.826 sink_rate_bps=1000000000 beats=335544320 errors=0 gaps=0 gap_beats=0 drop_count=0 underflows=0 egr_discard=0 max_reads=8 complete=1 error=0 beat_bytes=32 file_beat_bytes=32
 exit code 0
 ```
+
+The checker counts beats of 32 bytes; `last seq` is the sequence number of the first 16-byte
+word of the last beat (`fdverify`'s last sequence minus one).
 
 | `fdplay` exit code | Meaning |
 |---|---|
@@ -222,36 +234,40 @@ exit code 0
 
 ```{note}
 Without `--rate`, `fdplay` leaves the sink rate as it is; its default is one beat per
-`src_clk` cycle (3.2 GB/s), faster than the SSDs can read, so the checker reports
+`src_clk` cycle (8 GB/s), faster than the SSDs can read, so the checker reports
 underflows. Always give `fdplay` a `--rate` below the read rate of your SSDs.
 ```
 
 ## 6. See a failure on purpose
 
-To see what an overload looks like, record faster than the SSDs can write, for example
-3 GB/s. (A fast Gen4 SSD can record 10 GB at 3 GB/s cleanly inside its SLC cache, as the 1 TB
-drives on the [Benchmarks](benchmarks) page do on `vck190_fmcp1`; with such drives, record
-more than the cache to see drops.)
+To see what an overload looks like, record faster than the SSD can write, for example
+6 GB/s to one drive. (That is above what one SSD wrote on every target on the
+[Benchmarks](benchmarks) page: a Gen4 drive on the Gen3 x4 slots of the Zynq UltraScale+
+targets writes ~2.9-3.0 GB/s, and on `vck190_fmcp1` one Samsung 980 PRO 1TB ~4.95-4.98 GB/s and
+one Sabrent Rocket 2230 1TB ~4.6 GB/s.)
 
 ```
-sudo fdrec --rate 3000MB --size 10G /mnt/rec/over.dat; echo "exit code $?"
+sudo fdrec --rate 6000MB --size 10G /mnt/rec/over.dat; echo "exit code $?"
 sudo fdverify /mnt/rec/over.dat
 sudo fdplay --rate 500MB /mnt/rec/over.dat; echo "exit code $?"
 ```
 
 `fdrec` warns that beats were dropped and exits with code 2. `fdverify` lists the gaps
-(the first `--max-errors` of them), reports that the missing beats match the header's
-`drop_count` exactly, and ends with `RESULT FAIL`. `fdplay` still exits 0: the file, the
+(the first `--max-errors` of them), reports that the missing words match the header's
+`drop_count` exactly (two 16-byte words per dropped 32-byte beat), and ends with
+`RESULT FAIL`. `fdplay` still exits 0: the file, the
 read path and the playback are lossless, and the checker's gap beats equal the recording's
 drop count.
 
 ## 7. Find the sustained recording rate
 
-`fdbench.sh` sweeps the rate in 250 MB/s steps with 32 GB per step and prints the highest
-rate that recorded cleanly. It takes a while (32 GB at every step):
+`fdbench.sh` sweeps the rate in 500 MB/s steps from 500 MB/s up to the generator maximum
+(8000 MB/s), with 32 GB per step, and prints the highest rate that recorded cleanly. It takes
+a while (32 GB at every step); `--stop-on-fail` ends it at the first failing step, and
+`--from` / `--to` / `--step` narrow it:
 
 ```
-sudo fdbench.sh
+sudo fdbench.sh --stop-on-fail
 ```
 
 Run it once on a single SSD and once on RAID0. See [Benchmarks](benchmarks) for the

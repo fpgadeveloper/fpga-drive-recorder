@@ -25,10 +25,17 @@
 #     line containing FAIL (with a reason) on the first/any error, then calls
 #     $finish
 #   * it must terminate on its own (add a watchdog that prints FAIL on timeout)
+#   * optional: a line "// sim_runs: <run> <run> ..." anywhere in the testbench
+#     runs it once per <run>, where <run> is a comma-separated list of top-level
+#     parameter overrides (xelab -generic_top), eg.
+#       // sim_runs: DATA_WIDTH=128 DATA_WIDTH=256
+#     runs the testbench twice, with DATA_WIDTH 128 and with 256. Each run is
+#     reported separately as tb_<name>[<run>].
 #
 # A testbench passes only if its output contains "PASS" and no "FAIL", and
 # xsim itself exits cleanly. The script exits with status 1 if any testbench
-# fails, 0 if all pass. Work files and logs go to Vivado/sim/<tb>/ (gitignored).
+# fails, 0 if all pass. Work files and logs go to Vivado/sim/<tb>/ (gitignored;
+# Vivado/sim/<tb>_<run>/ for a testbench with sim_runs).
 #
 # XPM macros (eg. xpm_fifo_async) used by the RTL are taken from the
 # precompiled "xpm" library that ships with Vivado (-L xpm).
@@ -78,10 +85,37 @@ proc run_step {dir log args} {
   return [list $rc $out]
 }
 
-proc run_tb {tb_file} {
+# The runs of a testbench: a list of {label generics}; one unnamed run if the
+# file has no "// sim_runs:" line
+proc tb_runs {tb_file} {
+  set fh [open $tb_file r]
+  set text [read $fh]
+  close $fh
+  if {![regexp -line {^\s*//\s*sim_runs:\s*(.*)$} $text -> spec]} {
+    return [list [list "" {}]]
+  }
+  set runs {}
+  foreach run [regexp -all -inline {\S+} $spec] {
+    set generics {}
+    foreach g [split $run ","] {
+      if {$g ne ""} { lappend generics $g }
+    }
+    lappend runs [list $run $generics]
+  }
+  return $runs
+}
+
+proc run_tb {tb_file {label ""} {generics {}}} {
   global hdl_dir work_root
   set tb [file rootname [file tail $tb_file]]
-  set work [file join $work_root $tb]
+  set work_name $tb
+  if {$label ne ""} {
+    set work_name "${tb}_[regsub -all {[^A-Za-z0-9_]+} $label {_}]"
+    set tb_label "${tb}\[$label\]"
+  } else {
+    set tb_label $tb
+  }
+  set work [file join $work_root $work_name]
   file delete -force $work
   file mkdir $work
 
@@ -95,38 +129,40 @@ proc run_tb {tb_file} {
   set glbl [file join [file dirname [file dirname $xvlog]] data verilog src glbl.v]
   if {[file exists $glbl]} { lappend srcs $glbl }
 
-  puts "=== $tb: compile ([llength $srcs] files) ==="
+  puts "=== $tb_label: compile ([llength $srcs] files) ==="
   lassign [run_step $work [file join $work xvlog.log] \
              $xvlog -sv -i $hdl_dir -i [file dirname $tb_file] {*}$srcs] rc out
   if {$rc != 0} {
     puts $out
-    puts "=== $tb: FAIL (compile error, see [file join $work xvlog.log]) ==="
+    puts "=== $tb_label: FAIL (compile error, see [file join $work xvlog.log]) ==="
     return 0
   }
 
-  puts "=== $tb: elaborate ==="
+  puts "=== $tb_label: elaborate ==="
+  set gen_args {}
+  foreach g $generics { lappend gen_args -generic_top $g }
   set tops [list work.$tb]
   if {[file exists $glbl]} { lappend tops work.glbl }
   lassign [run_step $work [file join $work xelab.log] \
              $xelab -relax -timescale 1ns/1ps -L xpm -L unisims_ver -L unimacro_ver \
-             -s ${tb}_snap {*}$tops] rc out
+             {*}$gen_args -s ${tb}_snap {*}$tops] rc out
   if {$rc != 0} {
     puts $out
-    puts "=== $tb: FAIL (elaboration error, see [file join $work xelab.log]) ==="
+    puts "=== $tb_label: FAIL (elaboration error, see [file join $work xelab.log]) ==="
     return 0
   }
 
-  puts "=== $tb: run ==="
+  puts "=== $tb_label: run ==="
   lassign [run_step $work [file join $work xsim.log] $xsim ${tb}_snap -R] rc out
   puts $out
   set has_fail [regexp {FAIL} $out]
   set has_pass [regexp {PASS} $out]
   if {$rc != 0 || $has_fail || !$has_pass} {
     set why [expr {$rc != 0 ? "xsim exit $rc" : ($has_fail ? "testbench reported FAIL" : "no PASS line")}]
-    puts "=== $tb: FAIL ($why) ==="
+    puts "=== $tb_label: FAIL ($why) ==="
     return 0
   }
-  puts "=== $tb: PASS ==="
+  puts "=== $tb_label: PASS ==="
   return 1
 }
 
@@ -168,7 +204,11 @@ set passed {}
 set failed {}
 foreach tb_file $tbs {
   set tb [file rootname [file tail $tb_file]]
-  if {[run_tb $tb_file]} { lappend passed $tb } else { lappend failed $tb }
+  foreach run [tb_runs $tb_file] {
+    lassign $run label generics
+    set name [expr {$label eq "" ? $tb : "${tb}\[$label\]"}]
+    if {[run_tb $tb_file $label $generics]} { lappend passed $name } else { lappend failed $name }
+  }
 }
 
 puts ""

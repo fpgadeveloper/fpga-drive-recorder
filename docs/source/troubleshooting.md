@@ -17,7 +17,7 @@ applies as well. Work through these in order:
    carrier's VADJ supply. Check the carrier's VADJ setting against the
    [FMC card's requirements](https://docs.opsero.com/op063/datasheet/overview/).
 4. **Is the right image running?** The boot log should show this design's driver line
-   (`fdrec ... /dev/fdrec0: fdrec_core v1.1 ...`). A card that holds another design's
+   (`fdrec ... /dev/fdrec0: fdrec_core v1.2 ...`). A card that holds another design's
    image has another bitstream.
 5. **Check the link** with `dmesg | grep -i "pcie link"` and
    `lspci -vv | grep -E "LnkCap|LnkSta"` (see [Test the design in Linux](linux_test)).
@@ -78,42 +78,55 @@ the SSD writes were not completing fast enough. In order of likelihood:
 
 1. **The rate is above what the SSDs sustain.** Find the sustained rate with `fdbench.sh`
    (32 GB per step) and record below it. A rate that works for 10 GB may fail for longer
-   recordings. On a drive with a large cache (70-125 GB on the 1 TB drives in
+   recordings. On a drive with a large cache (66-125 GB on the 1 TB drives in
    [Benchmarks](benchmarks.md#long-recordings-past-the-slc-cache)), 32 GB stays inside the
    cache: confirm the rate with one recording longer than the cache. On the Zynq UltraScale+
-   targets one SSD slot writes at most ~2.94-3.04 GB/s (the Gen3 x4 link), even inside the
-   cache: record above 3000 MB/s (with some drives, 3000 MB/s itself) with RAID0 (see
-   [Where the bottlenecks are](benchmarks.md#where-the-bottlenecks-are)).
+   targets one SSD slot writes at most ~2.9-3.0 GB/s (the Gen3 x4 link), even inside the cache:
+   above ~3000 MB/s record with RAID0 (see
+   [Where the bottlenecks are](benchmarks.md#where-the-bottlenecks-are), which also lists the
+   ceilings of the recorder itself on each device family).
 2. **The SLC cache ran out.** If the drops start after a fixed amount of data (on the
-   Sabrent Rocket 2230 1TB ~70-75 GB, on the Samsung 980 PRO 1TB ~115-125 GB), the SSD's
+   Sabrent Rocket 2230 1TB ~66-75 GB, on the Samsung 980 PRO 1TB ~115-125 GB), the SSD's
    write cache filled up; see
    [Benchmarks](benchmarks.md#the-slc-cache). Use a lower rate, a larger or faster SSD, or
    RAID0.
-3. **`fstrim` just before the recording.** If the drops are near the start of the file,
-   the SSDs may still be processing discards: wait a few seconds after `fstrim` (or skip
-   it) before recording; see [Benchmarks](benchmarks.md#the-fstrim-finding-and-the-ring-size).
+3. **A slow start after `fstrim` or after idle time.** If a recording loses data in one gap
+   near the start of the file and then holds its rate (with the default ring often at
+   0.27 GB, right after the first pass through the ring), its first writes were slow: the
+   SSDs were still processing discards right after `fstrim`, or were waking from their
+   deepest power-saving state (NVMe APST) after idle time. Wait a few seconds after `fstrim`
+   (or skip it), and at high rates use a 512 MB ring or turn APST off; see
+   [Benchmarks](benchmarks.md#start-up-stalls-and-the-ring-size) and
+   [Applications](apps.md#fdrec).
 4. **The ring is too small for the SSD's write stalls.** More buffers (`--buffers 48`,
    `--buffers 64`) or larger buffers absorb longer stalls, within the hugepage pool. A single
    gap in an otherwise clean long recording, at no fixed offset, is such a stall: the default
-   256 MB ring lasts 128 ms at 2 GB/s, the largest ring of 8 MB buffers (64 x 8 MB = 512 MB)
-   256 ms. On the Sabrent Rocket 2230 1TB, 16 x 8 MB (128 MB) was too few for some write
-   stalls at 2250-3000 MB/s, and one 2000 MB/s recording had one such gap with the default
-   ring.
+   256 MB ring lasts 128 ms at 2 GB/s and 57 ms at 4.5 GB/s, a 512 MB ring (`--buffers 64`, or
+   `--buf-size 16M`) twice that. In the benchmarks the default ring was too small for some
+   stalls of every RAID0 pair at high rates: 4500 MB/s (Sabrent Rocket 2230 1TB pair) and
+   5000 MB/s (Samsung 980 PRO 1TB pair) on `zcu106_hpc0`, and 7000 MB/s (both pairs) on
+   `vck190_fmcp1`, were clean 3 of 3 only with a 512 MB ring.
 5. **The rate exceeds the FIFO budget.** If `fdrec` warns that "the ingest FIFO covers only
    ... of the DMA restart gap", the rate is too high for the design's FIFO, whatever the
    SSD; see [Applications](apps.md#tuning-the-fifo-budget-at-buffer-boundaries). Without a
    warning, a drop whose gap starts one ingest FIFO depth plus 7 beats after an 8 MiB buffer
-   boundary (262 256 bytes with the 16384-beat FIFO of the reference design) means the DMA
-   stopped at that boundary for longer than the FIFO lasts. With the image of this repository
-   the DMA does not wait for software at a boundary (driver 1.2 and its `xilinx_dma` patch,
-   see [Kernel driver](driver.md)); it stops there only when no free buffer is queued. Such a
-   gap therefore normally means that the ring ran out behind the SSD: `fdrec --stats` then
-   shows `inflight` at the queue depth and a write rate below the recording rate (items 1
-   and 4). If the SSD keeps up, check that the module is that version
-   (`modinfo -F version fdrec`), that the kernel was built with the `meta-fdrec` layer, and
-   that the AXI DMA interrupts are not on CPU0 (`dmesg | grep dma-channel`,
+   boundary (262 368 bytes = 8192 + 7 beats of 32 bytes with the FIFO of the reference
+   designs) means the DMA stopped at that boundary for longer than the FIFO lasts. With the
+   image of this repository the DMA does not wait for software at a boundary (driver 1.3 and
+   its `xilinx_dma` patch, see [Kernel driver](driver.md)); it stops there only when no free
+   buffer is queued. Such a gap therefore normally means that the ring ran out behind the
+   SSD: `fdrec --stats` then shows `inflight` at the queue depth and a write rate below the
+   recording rate (items 1 and 4). If the SSD keeps up, check that the module is that version
+   (`modinfo -F version fdrec` gives 1.3), that the kernel was built with the `meta-fdrec`
+   layer, and that the AXI DMA interrupts are not on CPU0 (`dmesg | grep dma-channel`,
    `/proc/interrupts`; the `dma_irq_cpu` module parameter), since they recycle the buffers.
-6. **Other I/O on the same SSDs**, a nearly full filesystem, or a filesystem other than XFS
+6. **The rate is above what the fabric path into DDR sustains.** A first gap inside a buffer,
+   at no fixed offset from its start, while the SSDs keep up, means the stream outran the path
+   from the fabric into DDR: on the Zynq UltraScale+ targets above ~5000 MB/s (the
+   `S_AXI_HP2_FPD` port), on `vck190_fmcp1` above 7750 MB/s (see
+   [Benchmarks](benchmarks.md#fabric-only-no-ssd)). `fdrec --no-write` measures that path on
+   your board without an SSD.
+7. **Other I/O on the same SSDs**, a nearly full filesystem, or a filesystem other than XFS
    or ext4.
 
 `fdverify` shows where the gaps are (file offsets), which tells you whether they are at the
@@ -161,12 +174,14 @@ rare.
 The sink consumed faster than the SSDs delivered the data.
 
 * **No `--rate`, or a rate above the read rate.** The checker's default rate is one beat
-  per clock (3.2 GB/s), faster than the SSDs; give `fdplay --rate` below the read rate.
+  per clock (8 GB/s), faster than the SSDs; give `fdplay --rate` below the read rate. Without
+  an SSD in the way, playback from DDR is clean up to ~5000 MB/s on the Zynq UltraScale+
+  targets and 7500 MB/s on `vck190_fmcp1` (see [Benchmarks](benchmarks.md#fabric-only-no-ssd)).
 * **Read stalls.** Isolated underflow bursts near the read rate are read stalls longer than
   the ring lasts at that rate; more buffers absorb them (see
   [Benchmarks](benchmarks.md#playback)).
 * **Underflows of millions of ticks in almost every run at one band of rates** (on a Zynq
-  UltraScale+ target typically 2500-2750 MB/s from one drive) mean the AXI DMA playback
+  UltraScale+ target, at rates well within what the drive reads) mean the AXI DMA playback
   interrupt is being handled on the CPU that takes the NVMe completions (CPU0), where it
   waits behind their bursts. Check `dmesg | grep dma-channel` and `/proc/interrupts`: the
   driver pins both DMA interrupts to the last online CPU by default (module parameter

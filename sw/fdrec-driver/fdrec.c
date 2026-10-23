@@ -16,6 +16,12 @@
  *
  * Either way the sample data is never copied by the CPU.
  *
+ * The fabric datapath is 128 or 256 bits wide (fdrec_core DATA_WIDTH). The
+ * driver reads the beat size from the BEAT_BYTES register at probe (register
+ * map 1.2; the register reads 0 on older maps, whose datapath is 128 bits)
+ * and uses it for every beat <-> byte conversion: PKT_LEN, the TPG and
+ * checker rates, the playback length check and the egress FIFO priming.
+ *
  * Buffer model (docs/source/driver.md has the full description):
  *
  *   - User space owns the memory: it allocates the buffers from 2 MB hugepages
@@ -31,8 +37,8 @@
  *     dmaengine slave-sg descriptor per buffer, see FDREC_DMA_DEPTH): the
  *     engine runs from one buffer into the next without a software restart;
  *     the IRQ and the completion callback only recycle buffers. The
- *     packetizer asserts TLAST every buf_size / 16 beats, so every descriptor
- *     ends exactly on a buffer boundary.
+ *     packetizer asserts TLAST every buf_size / beat_bytes beats, so every
+ *     descriptor ends exactly on a buffer boundary.
  *   - WAIT_FILLED hands a completed buffer to user space, RELEASE re-queues it.
  *   - If no buffer is free the DMA stalls, the packetizer is back-pressured,
  *     the ingest FIFO fills and beats are dropped and counted. That is the
@@ -117,6 +123,7 @@
 #include <linux/iopoll.h>
 #include <linux/idr.h>
 #include <linux/math64.h>
+#include <linux/log2.h>
 #include <linux/timekeeping.h>
 #include <linux/iommu.h>
 #include <linux/interrupt.h>
@@ -128,7 +135,10 @@
 #include "fdrec_uapi.h"
 
 #define DRV_NAME		"fdrec"
-#define FDREC_DRV_VERSION	"1.2"
+#define FDREC_DRV_VERSION	"1.3"
+
+/* Largest BEAT_BYTES the driver accepts (a 1024-bit datapath) */
+#define DRV_MAX_BEAT_BYTES	128
 
 /* AXI DMA (xilinx_dma) facts used for validation. The driver pre-allocates
  * this many buffer descriptors per channel (XILINX_DMA_NUM_DESCS). */
@@ -155,7 +165,7 @@
  * issue_pending would start them as a batch with a larger threshold (and the
  * patch does not append to such a chain). Each completion lets the callback
  * (tasklet) submit the next free buffer; with two descriptors queued behind
- * the active one, the tasklet has two buffer times (2 x 2.6 ms at 3.2 GB/s
+ * the active one, the tasklet has two buffer times (2 x 1.05 ms at 8 GB/s
  * with 8 MiB buffers) before the engine reaches the end of the chain.
  *
  * The append requires the BD ring order of xilinx_dma (the running tail's
@@ -219,6 +229,7 @@ struct fdrec_dev {
 	u32 hw_version;
 	u32 src_clk_hz;
 	u32 dp_clk_hz;
+	u32 beat_bytes;			/* bytes per fabric beat (BEAT_BYTES) */
 	u32 fifo_depth;
 	u32 caps;			/* FDREC_CAP_* */
 
@@ -292,21 +303,21 @@ static u64 fd_rate_get(struct fdrec_dev *fd)
 
 	if (inc > FDREC_TPG_RATE_INC_ONE)
 		inc = FDREC_TPG_RATE_INC_ONE;
-	/* rate_bps = INC / 2^31 * SRC_CLK_HZ * 16 */
-	return mul_u64_u64_div_u64(inc, (u64)fd->src_clk_hz * FDREC_BEAT_BYTES,
+	/* rate_bps = INC / 2^31 * SRC_CLK_HZ * BEAT_BYTES */
+	return mul_u64_u64_div_u64(inc, (u64)fd->src_clk_hz * fd->beat_bytes,
 				   1ull << FDREC_TPG_RATE_INC_FRAC_BITS);
 }
 
 static u64 fd_rate_set(struct fdrec_dev *fd, u64 rate_bps)
 {
-	u64 max = (u64)fd->src_clk_hz * FDREC_BEAT_BYTES;
+	u64 max = (u64)fd->src_clk_hz * fd->beat_bytes;
 	u64 inc;
 
 	if (!max)
 		return 0;
 	if (rate_bps > max)
 		rate_bps = max;
-	/* TPG_RATE_INC = rate_bps * 2^31 / (SRC_CLK_HZ * 16), rounded */
+	/* TPG_RATE_INC = rate_bps * 2^31 / (SRC_CLK_HZ * BEAT_BYTES), rounded */
 	inc = mul_u64_u64_div_u64(rate_bps, 1ull << FDREC_TPG_RATE_INC_FRAC_BITS,
 				  max);
 	if (inc > FDREC_TPG_RATE_INC_ONE)
@@ -691,7 +702,8 @@ static int fdrec_register(struct fdrec_dev *fd, struct fdrec_bufs __user *uarg)
 	if (!a.buf_size || a.buf_size % FDREC_BUF_ALIGN ||
 	    a.buf_size > FDREC_MAX_BUF_SIZE)
 		return -EINVAL;
-	if (a.buf_size / FDREC_BEAT_BYTES > FDREC_MAX_PKT_LEN)
+	if (a.buf_size % fd->beat_bytes ||
+	    a.buf_size / fd->beat_bytes > FDREC_MAX_PKT_LEN)
 		return -EINVAL;
 
 	addrs = memdup_array_user(u64_to_user_ptr(a.addrs), a.count, sizeof(u64));
@@ -769,7 +781,7 @@ static int fdrec_start(struct fdrec_dev *fd, struct fdrec_start __user *uarg)
 		if (fd->bufs[i].state != BUF_FREE)
 			return -EBUSY;
 
-	pkt_len = (u32)(fd->buf_size / FDREC_BEAT_BYTES);
+	pkt_len = (u32)(fd->buf_size / fd->beat_bytes);
 	tpg_was_on = fd_rd(fd, FDREC_TPG_CTRL) & FDREC_TPG_CTRL_ENABLE;
 
 	/* Flush the FIFO and clear every counter; disables packetizer + TPG */
@@ -819,9 +831,9 @@ static int fdrec_start(struct fdrec_dev *fd, struct fdrec_start __user *uarg)
 	/*
 	 * SOFT_RST cleared the TPG sequence counter and left the TPG disabled,
 	 * and the packetizer is already passing data, so the first beat the
-	 * TPG emits from here on -- sequence number 0 -- is the first beat
-	 * recorded. (TPG_SEQ_NEXT is not read back here: it is a src_clk-domain
-	 * snapshot that may lag by ~0.5 us.)
+	 * TPG emits from here on -- word 0 carries sequence number 0 -- is the
+	 * first beat recorded. (TPG_SEQ_NEXT is not read back here: it is a
+	 * src_clk-domain snapshot that may lag by ~0.5 us.)
 	 */
 	a.first_seq = 0;
 	fd->started_tpg = false;
@@ -987,7 +999,7 @@ static u64 fd_sink_rate_get(struct fdrec_dev *fd)
 	if (inc > FDREC_CHK_RATE_INC_ONE)
 		inc = FDREC_CHK_RATE_INC_ONE;
 	/* same Q1.31 scheme as the TPG, on snk_clk = src_clk */
-	return mul_u64_u64_div_u64(inc, (u64)fd->src_clk_hz * FDREC_BEAT_BYTES,
+	return mul_u64_u64_div_u64(inc, (u64)fd->src_clk_hz * fd->beat_bytes,
 				   1ull << FDREC_TPG_RATE_INC_FRAC_BITS);
 }
 
@@ -995,7 +1007,7 @@ static u64 fd_sink_rate_get(struct fdrec_dev *fd)
  * keep the MM2S channel from ever finishing a buffer */
 static u64 fd_sink_rate_set(struct fdrec_dev *fd, u64 rate_bps)
 {
-	u64 max = (u64)fd->src_clk_hz * FDREC_BEAT_BYTES;
+	u64 max = (u64)fd->src_clk_hz * fd->beat_bytes;
 	u64 inc;
 
 	if (!max)
@@ -1052,8 +1064,8 @@ static void fd_chk_enable_primed(struct fdrec_dev *fd, u64 first_bytes)
 	u32 want = depth - depth / 32;
 	u32 v;
 
-	if (first_bytes / FDREC_BEAT_BYTES < want)
-		want = (u32)(first_bytes / FDREC_BEAT_BYTES);
+	if (first_bytes / fd->beat_bytes < want)
+		want = (u32)(first_bytes / fd->beat_bytes);
 	if (readl_poll_timeout(fd->regs + FDREC_EGR_FIFO_LEVEL, v, v >= want ||
 			       !READ_ONCE(fd->chk_pending), 2, 100000))
 		dev_warn(fd->dev, "egress FIFO did not prime (level %u of %u) in 100 ms; enabling the checker anyway\n",
@@ -1205,7 +1217,8 @@ static int fdrec_play_submit(struct fdrec_dev *fd, struct fdrec_play_submit __us
 		return -EFAULT;
 	if (fd->dir != FDREC_DIR_PLAY || a.flags || a.index >= fd->nbufs)
 		return -EINVAL;
-	if (!a.bytes || a.bytes > fd->buf_size || a.bytes % FDREC_BEAT_BYTES)
+	/* whole fabric beats only: the egress path ignores TKEEP */
+	if (!a.bytes || a.bytes > fd->buf_size || a.bytes % fd->beat_bytes)
 		return -EINVAL;
 	if (!fd->running)
 		return -EPIPE;
@@ -1495,7 +1508,7 @@ static long fdrec_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 			.hw_version = fd->hw_version,
 			.src_clk_hz = fd->src_clk_hz,
 			.dp_clk_hz = fd->dp_clk_hz,
-			.beat_bytes = FDREC_BEAT_BYTES,
+			.beat_bytes = fd->beat_bytes,
 			.fifo_depth = fd->fifo_depth,
 			.max_bufs = FDREC_MAX_BUFS,
 			.caps = fd->caps,
@@ -1675,6 +1688,7 @@ FDREC_RO_U64(beats_out, fd_rd64(fd, FDREC_PKT_BEATS_OUT_LO));
 FDREC_RO_U64(seq_next, fd_rd64(fd, FDREC_TPG_SEQ_NEXT_LO));
 FDREC_RO_U64(src_clk_hz, fd->src_clk_hz);
 FDREC_RO_U64(dp_clk_hz, fd->dp_clk_hz);
+FDREC_RO_U64(beat_bytes, fd->beat_bytes);
 FDREC_RO_U64(fifo_depth, fd->fifo_depth);
 
 static ssize_t version_show(struct device *dev, struct device_attribute *attr,
@@ -1846,6 +1860,7 @@ static struct attribute *fdrec_attrs[] = {
 	&dev_attr_seq_next.attr,
 	&dev_attr_src_clk_hz.attr,
 	&dev_attr_dp_clk_hz.attr,
+	&dev_attr_beat_bytes.attr,
 	&dev_attr_version.attr,
 	/* VERSION >= 1.1 */
 	&dev_attr_chk_enable.attr,
@@ -1977,6 +1992,18 @@ static int fdrec_probe(struct platform_device *pdev)
 	fd->src_clk_hz = fd_rd(fd, FDREC_SRC_CLK_HZ);
 	fd->dp_clk_hz = fd_rd(fd, FDREC_DP_CLK_HZ);
 	fd->fifo_depth = fd_rd(fd, FDREC_ING_FIFO_DEPTH);
+	/* Bytes per fabric beat (register map 1.2). The register is reserved and
+	 * reads 0 on maps 1.0/1.1, whose datapath is 128 bits wide. */
+	fd->beat_bytes = fd_rd(fd, FDREC_BEAT_BYTES_REG);
+	if (!fd->beat_bytes)
+		fd->beat_bytes = FDREC_BEAT_BYTES_DEFAULT;
+	if (fd->beat_bytes < FDREC_WORD_BYTES ||
+	    fd->beat_bytes > DRV_MAX_BEAT_BYTES ||
+	    !is_power_of_2(fd->beat_bytes))
+		return dev_err_probe(dev, -ENODEV,
+				     "unsupported fdrec_core BEAT_BYTES %u (expected a power of 2, %u to %u)\n",
+				     fd->beat_bytes, FDREC_WORD_BYTES,
+				     DRV_MAX_BEAT_BYTES);
 
 	fd->caps = FDREC_CAP_TPG | FDREC_CAP_S2MM;
 	if ((fd->hw_version & FDREC_VERSION_MINOR_MASK) >= 1)
@@ -2037,9 +2064,9 @@ static int fdrec_probe(struct platform_device *pdev)
 		goto err_ida;
 
 	platform_set_drvdata(pdev, fd);
-	dev_info(dev, "/dev/%s: fdrec_core v%u.%u, src_clk %u Hz, dp_clk %u Hz, FIFO %u beats, DMA rx %s tx %s (max segment %u bytes)%s\n",
+	dev_info(dev, "/dev/%s: fdrec_core v%u.%u, src_clk %u Hz, dp_clk %u Hz, beat %u bytes, FIFO %u beats, DMA rx %s tx %s (max segment %u bytes)%s\n",
 		 fd->name, fd->hw_version >> 16, fd->hw_version & 0xffff,
-		 fd->src_clk_hz, fd->dp_clk_hz, fd->fifo_depth,
+		 fd->src_clk_hz, fd->dp_clk_hz, fd->beat_bytes, fd->fifo_depth,
 		 dma_chan_name(fd->chans[FD_RX]),
 		 fd->chans[FD_TX] ? dma_chan_name(fd->chans[FD_TX]) : "-",
 		 fd->max_sg_len,

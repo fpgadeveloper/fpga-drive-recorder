@@ -6,7 +6,7 @@ AXI DMA wrote it to memory:
 | Offset | Size | Content |
 |--------|------|---------|
 | 0 | 4096 | Header (`struct fdrec_file_header`), little-endian, zero-padded |
-| 4096 | `data_bytes` | Beats 0, 1, 2, … — 16 bytes each, little-endian |
+| 4096 | `data_bytes` | Beats 0, 1, 2, … — `beat_bytes` (32) bytes each, little-endian |
 
 The 4 KB header keeps the data aligned for `O_DIRECT`. The header is written once when the
 recording starts (without the *complete* flag) and rewritten when it stops, with the final
@@ -24,7 +24,7 @@ The structure is defined as a packed C struct in
 | 0 | `magic` | char[8] | `"FDREC\0\0\0"` |
 | 8 | `header_version` | u32 | 1 |
 | 12 | `header_size` | u32 | 4096 |
-| 16 | `beat_bytes` | u32 | 16 |
+| 16 | `beat_bytes` | u32 | bytes per fabric beat of the recorder: 32 (256-bit datapath of the reference designs), 16 (128-bit datapath) |
 | 20 | `flags` | u32 | bit0: the source was the test pattern generator; bit1: complete (header rewritten at stop) |
 | 24 | `design_version` | u32 | `VERSION` register of the design, `[31:16]` major, `[15:0]` minor |
 | 28 | `src_clk_hz` | u64 | source clock frequency |
@@ -32,36 +32,53 @@ The structure is defined as a packed C struct in
 | 44 | `start_time_ns` | u64 | `CLOCK_REALTIME` (ns since the epoch) when the datapath was enabled |
 | 52 | `stop_time_ns` | u64 | `CLOCK_REALTIME` at stop |
 | 60 | `data_bytes` | u64 | bytes of data after the header |
-| 68 | `drop_count` | u64 | beats dropped by the ingest FIFO (see below) |
-| 76 | `first_seq` | u64 | sequence number of the first beat, if the TPG was the source (0) |
+| 68 | `drop_count` | u64 | beats (of `beat_bytes`) dropped by the ingest FIFO (see below) |
+| 76 | `first_seq` | u64 | sequence number of the first 16-byte word, if the TPG was the source (0) |
 | 84 | `target` | char[32] | target design, e.g. `uzev`, NUL-padded |
 | 116 | `hostname` | char[64] | NUL-padded |
 | 180 | reserved | u8[3916] | zero |
 
 `drop_count` is the ingest FIFO's drop counter read when the last recorded buffer
-completed. It covers every beat lost before the last recorded beat (and possibly a few
-dropped just after it), so a recording is valid only if it is **0**. `fdrec` exits with code
-2 when it is not.
+completed, in beats of `beat_bytes`. It covers every beat lost before the last recorded beat
+(and possibly a few dropped just after it), so a recording is valid only if it is **0**.
+`fdrec` exits with code 2 when it is not.
 
 ## Data
 
-Each 16-byte beat is one 128-bit AXI-Stream word as it came out of the data source: bytes 0–7
-are `TDATA[63:0]`, bytes 8–15 are `TDATA[127:64]`, both little-endian. The recorder adds no
-framing, padding or timestamps, so a file of N beats has `data_bytes = 16 × N`.
+Each beat is one AXI-Stream transfer of the fabric datapath as it came out of the data
+source, `beat_bytes` bytes, little-endian: byte `k` of the beat is `TDATA[8k+7:8k]`. On the
+256-bit reference designs a beat is 32 bytes (`TDATA[255:0]`); on a 128-bit datapath it is
+16 bytes. The recorder adds no framing, padding or timestamps, so a file of N beats has
+`data_bytes = beat_bytes × N`.
 
-With the test pattern generator as the source, beat `n` carries:
+With the test pattern generator as the source, the data is a sequence of 16-byte **words**,
+whatever the beat size. Word `n` carries:
 
-* `TDATA[63:0]` = `seq` (a 64-bit counter that increments on every beat the generator emits,
-  including beats that are later dropped),
-* `TDATA[127:64]` = `~seq`.
+* bytes 0–7 = `lower` = `seq`, a 64-bit counter that advances by one per word the generator
+  emits, including the words of beats that are later dropped,
+* bytes 8–15 = `upper` = `~seq`.
 
-So in a clean recording `lower` increases by exactly one from beat to beat, starting at
-`first_seq`, and `upper == ~lower` on every beat. A jump in `lower` is a gap of dropped beats
-(its size is the jump minus one); a beat with `upper != ~lower` is corrupted. This is what
-`fdverify` checks.
+A 32-byte beat holds two consecutive words: `TDATA[127:0]` is the word with `seq` and
+`TDATA[255:128]` the word with `seq + 1`, and `seq` advances by two per beat. A clean
+recording is therefore **byte-identical** whether it was made with 16-byte or 32-byte
+beats: word `n` of the data carries `seq = first_seq + n`, and the file's `data_bytes =
+16 × (number of words)` in both cases.
 
-With your own data source, the data is whatever your logic presents on the 128-bit
-interface; see [Replacing the test pattern generator](custom_source).
+So in a clean recording `lower` increases by exactly one from word to word, starting at
+`first_seq`, and `upper == ~lower` in every word. A jump in `lower` is a gap left by dropped
+beats (its size, the jump minus one, is `beat_bytes` / 16 words per dropped beat, starting at
+a beat boundary); a word with `upper != ~lower` is corrupted. This is what `fdverify`
+checks, per word, for both beat sizes. The playback checker (`fdrec_check`) applies the
+same pattern to every word of every beat it receives.
+
+A recording made with 16-byte beats can be played on a 256-bit design: a clean one verifies
+exactly. If it has drops, a gap of an odd number of words cannot be represented in 32-byte
+beats (see [fdplay](apps.md#fdplay)); an odd number of words in total leaves the last word
+unplayed.
+
+With your own data source, the data is whatever your logic presents on the `TDATA`
+interface (256 bits wide on the reference designs); see
+[Replacing the test pattern generator](custom_source).
 
 ## Reading a recording
 
@@ -74,7 +91,9 @@ with open("rec.dat", "rb") as f:
     hdr = f.read(4096)
     magic, ver, hsize, beat, flags, dver = struct.unpack_from("<8s5I", hdr, 0)
     src_clk, rate, t0, t1, nbytes, drops, first = struct.unpack_from("<7Q", hdr, 28)
-    data = np.fromfile(f, dtype="<u8").reshape(-1, 2)   # [:,0] = lower, [:,1] = upper
+    # 16-byte pattern words, for any beat size: [:,0] = lower, [:,1] = upper
+    data = np.fromfile(f, dtype="<u8").reshape(-1, 2)
+    beats = data.reshape(-1, beat // 16, 2)              # [beat, word in beat, lower/upper]
 ```
 
 C: include `fdrec_file.h` and read the first 4096 bytes into a `struct fdrec_file_header`.

@@ -8,8 +8,9 @@
 //     m_axis (src_clk, first-word-fall-through, to the user_data_sink).
 //   * Lossless: s_axis_tready is deasserted while the FIFO is full, so the DMA
 //     is stalled (backpressure) instead of data being dropped.
-//   * TDATA and TLAST are carried through the FIFO; TKEEP is ignored (the
-//     playback path always moves whole 16-byte beats).
+//   * DATA_WIDTH-bit beats (128 or 256); FIFO_DEPTH and the counters are in
+//     beats. TDATA and TLAST are carried through the FIFO; TKEEP is ignored
+//     (the playback path always moves whole beats).
 //   * flush (dp_clk, level): beats from the DMA are accepted and DISCARDED
 //     (tready = 1, nothing is written), so the DMA can always drain, e.g. to
 //     stop a playback while the sink is disabled. Discarded beats are counted
@@ -23,6 +24,7 @@
 `timescale 1ns / 1ps
 
 module fdrec_egress #(
+  parameter integer DATA_WIDTH = 256,    // 128 or 256
   parameter integer FIFO_DEPTH = 4096,   // beats; power of 2, 16..131072
   parameter integer CDC_STAGES = 3
 ) (
@@ -31,8 +33,8 @@ module fdrec_egress #(
   input  wire          fifo_rst,          // FIFO reset window, dp_clk domain
   input  wire          srst,              // soft reset in progress (level)
   input  wire          flush,
-  input  wire [127:0]  s_axis_tdata,
-  input  wire [15:0]   s_axis_tkeep,
+  input  wire [DATA_WIDTH-1:0]   s_axis_tdata,
+  input  wire [DATA_WIDTH/8-1:0] s_axis_tkeep,
   input  wire          s_axis_tlast,
   input  wire          s_axis_tvalid,
   output wire          s_axis_tready,
@@ -43,7 +45,7 @@ module fdrec_egress #(
 
   // Sink side (src_clk), first-word-fall-through
   input  wire          src_clk,
-  output wire [127:0]  m_axis_tdata,
+  output wire [DATA_WIDTH-1:0] m_axis_tdata,
   output wire          m_axis_tlast,
   output wire          m_axis_tvalid,
   input  wire          m_axis_tready
@@ -75,8 +77,8 @@ module fdrec_egress #(
   xpm_fifo_async #(
     .FIFO_MEMORY_TYPE    ("block"),
     .FIFO_WRITE_DEPTH    (FIFO_DEPTH),
-    .WRITE_DATA_WIDTH    (129),
-    .READ_DATA_WIDTH     (129),
+    .WRITE_DATA_WIDTH    (DATA_WIDTH + 1),
+    .READ_DATA_WIDTH     (DATA_WIDTH + 1),
     .READ_MODE           ("fwft"),
     .FIFO_READ_LATENCY   (0),
     .CDC_SYNC_STAGES     (CDC_STAGES),

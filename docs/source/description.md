@@ -22,14 +22,15 @@ The recording is **zero-copy**:
 * The CPU never reads, writes or copies the data. It only does the bookkeeping: DMA
   descriptors, cache maintenance and the I/O requests.
 
-The data source is a block-design hierarchy (`user_data_source`) with a 128-bit
-AXI4-Stream output. In the reference design it holds a test pattern generator, which
+The data source is a block-design hierarchy (`user_data_source`) with a 256-bit
+AXI4-Stream output: up to one 32-byte beat per 250 MHz clock, 8 GB/s. In the reference
+design it holds a test pattern generator, which
 models an ADC: it produces data at a programmable rate and cannot be stalled. You replace
 it with your own ADC, sensor or processing logic (see [custom data source](custom_source)).
 If the SSDs cannot keep up, the data that does not fit is dropped and counted in the
 fabric, never silently lost: every recording reports its drop count, and a valid
-recording has a drop count of zero. The `fdverify` tool checks a test-pattern recording
-beat by beat.
+recording has a drop count of zero. The `fdverify` tool checks every word of a
+test-pattern recording.
 
 Playback runs the same path in reverse: the app reads a recording into the hugepage
 buffers with `O_DIRECT` reads, and the DMA streams the buffers into a second hierarchy,
@@ -58,24 +59,31 @@ NVMe host:
   and by the Linux I/O path (see [Benchmarks](benchmarks)).
 * It is not a fabric NVMe host engine.
 
-For CPU-less operation or rates beyond what Linux can sustain, hardware NVMe host IP is
-available from Missing Link Electronics: see their
+For operation without the CPU in the data path, Opsero's
+[fpga-drive-nvme-offload](https://offload.fpgadrive.com) issues the NVMe commands from the
+fabric (AMD NVMe Host Accelerator IP, licensed) on the same boards and FMC cards, and
+hardware NVMe host IP is available from Missing Link Electronics: see their
 [NVMe Streamer](https://www.missinglinkelectronics.com/ip-cores/nvme-streamer/).
 
 ## Performance
 
 What the recorder sustains depends on the SSDs far more than on the FPGA: consumer SSDs write
 fast only until their SLC cache is full, and the recorder's rate is the drive's worst moment
-over the whole recording. With the 1 TB SSDs measured, one drive sustains 1750 MB/s past its
-SLC cache (just below its post-cache write rate of ~1.77-1.8 GB/s), and two drives in RAID0
-3200 MB/s, the generator maximum, over 350-480 GiB recordings.
-Inside the cache, one drive records up to 2750-3000 MB/s on the Gen3 x4 slots of
-`zcu106_hpc0` and 3200 MB/s on the Gen4 x4 slots of `vck190_fmcp1`, and a RAID0 pair records up
-to the generator's 3200 MB/s maximum.
+over the whole recording. With the two 1 TB SSDs measured (Sabrent Rocket 2230 1TB, Samsung
+980 PRO 1TB), one drive sustains 1750 MB/s past its SLC cache (just below its post-cache write
+rate of ~1.77-1.8 GB/s), and two drives in RAID0 3000-3500 MB/s over 350-480 GiB recordings.
+Inside the cache, one drive records 2500 MB/s (Sabrent) or 3000 MB/s (980 PRO) on the Gen3 x4
+slots of `zcu106_hpc0` and 4500 MB/s (either) on the Gen4 x4 slots of `vck190_fmcp1`. A RAID0
+pair records 3500 / 4500 MB/s (Sabrent / 980 PRO) on `zcu106_hpc0`, 4500 / 5000 MB/s with a
+512 MB buffer ring, and 4000 / 6500 MB/s on `vck190_fmcp1`, 7000 MB/s with a 512 MB ring.
+The fabric datapath carries 8 GB/s (256 bits at 250 MHz). Without an SSD, the recorder moves
+~5000 MB/s on the Zynq UltraScale+ targets, where the AXI DMA's port into DDR is the limit
+(the 980 PRO pair reaches it), and 7750 MB/s (recording) and 7500 MB/s (playback) on
+`vck190_fmcp1`.
 Measured rates per target and SSD are on the
 [Benchmarks](benchmarks) page, and
-[Where the bottlenecks are](benchmarks.md#where-the-bottlenecks-are) explains why you do not
-get an SSD's rated speed and what to do about it.
+[Where the bottlenecks are](benchmarks.md#where-the-bottlenecks-are) lists every ceiling, per
+device family, and what to do about it.
 
 ## Hardware platforms
 
@@ -130,7 +138,7 @@ Linux image contains:
 | `fdrec.ko` | Kernel driver: pins the app's hugepage buffers, drives the AXI DMA through the kernel's `xilinx_dma` driver, does the cache maintenance, exposes `/dev/fdrec0` and sysfs counters ([Kernel driver](driver)) |
 | `fdrec` | Record the fabric stream to a file ([Applications](apps)) |
 | `fdplay` | Play a recording back into the fabric |
-| `fdverify` | Verify a test-pattern recording beat by beat |
+| `fdverify` | Verify a test-pattern recording word by word |
 | `fdbench.sh` | Find the sustained recording rate of a board + SSD combination |
 | `fdsetup-raid0.sh` | Prepare the recording filesystem: one SSD or a RAID0 array of two |
 | `single_*_test.sh`, `dual_*_test.sh` | The `dd` speed-test scripts of fpga-drive-aximm-pcie, for comparison ([Test the design in Linux](linux_test)) |

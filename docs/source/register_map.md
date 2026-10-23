@@ -26,6 +26,13 @@ address plus the offset, for example `sudo devmem2 0x420010000 w` reads `VERSION
   below).
 * **Parameter** in the reset column means the value is set when the design is built
   (block-design parameters of `fdrec_core`), not at run time.
+* **Beats and words.** The fabric datapath is `DATA_WIDTH` bits wide (an RTL parameter of
+  the `fdrec_*` modules, 128 or 256; **256** on the reference designs). One transfer on it
+  is a **beat** of `BEAT_BYTES` = `DATA_WIDTH` / 8 bytes (32 on the reference designs; read
+  it from the `BEAT_BYTES` register). The test pattern is defined on 16-byte **words**, and
+  a beat carries `BEAT_BYTES` / 16 consecutive words. Every counter, FIFO depth, level and
+  high-water mark, and `PKT_LEN`, is in beats; the sequence numbers (`TPG_SEQ_NEXT`,
+  `CHK_LAST_SEQ`) are in words.
 
 ## Conventions
 
@@ -39,7 +46,7 @@ address plus the offset, for example `sudo devmem2 0x420010000 w` reads `VERSION
   Reading `*_HI` again returns the same latched value until `*_LO` is read again.
 * **`GLOBAL_CTRL.SOFT_RST`** clears the ingest FIFO, all counters (including the TPG sequence
   number `SEQ_NEXT`), the FIFO high-water mark and the sticky flags, and disables the
-  packetizer and the TPG. Since 1.1 it also resets the egress FIFO and the checker, clears
+  packetizer and the TPG. It also resets the egress FIFO and the checker, clears
   the `CHK_*` / `EGR_*` counters, disables the checker and clears `EGR_CTRL.FLUSH`; while it
   is in progress, beats from the DMA MM2S are accepted and discarded, so a soft reset never
   wedges the DMA. `TPG_RATE_INC`, `PKT_LEN` and `CHK_RATE_INC` keep their values. The bit clears
@@ -52,35 +59,35 @@ address plus the offset, for example `sudo devmem2 0x420010000 w` reads `VERSION
   counters are consistent with each other. The six `CHK_*` counters of the playback checker
   come from the `src_clk` domain the same way, as one separate coherent snapshot.
 * **TPG rate:** `TPG_RATE_INC` is a Q1.31 fraction of one beat per `src_clk` cycle
-  (`0x8000_0000` = 1 beat/clock, the maximum; larger values clamp). With 16-byte beats:
+  (`0x8000_0000` = 1 beat/clock, the maximum; larger values clamp):
 
   ```
-  rate_bps     = TPG_RATE_INC / 2^31 × SRC_CLK_HZ × 16
-  TPG_RATE_INC = rate_bps × 2^31 / (SRC_CLK_HZ × 16)
+  rate_bps     = TPG_RATE_INC / 2^31 × SRC_CLK_HZ × BEAT_BYTES
+  TPG_RATE_INC = rate_bps × 2^31 / (SRC_CLK_HZ × BEAT_BYTES)
   ```
 
-  For example, at `SRC_CLK_HZ` = 199 998 001 the maximum rate is 3.19997 GB/s, and
-  1 GB/s (10⁹ B/s) is `TPG_RATE_INC` = `0x2800_1A34`.
+  For example, at `SRC_CLK_HZ` = 249 997 498 (the `uzev` build) and `BEAT_BYTES` = 32 the maximum rate is
+  7.99992 GB/s, and 1 GB/s (10⁹ B/s) is `TPG_RATE_INC` = `0x1000_0A7F`.
 
 ## Registers
 
 | Offset | Name | Access | Reset | Bits |
 |---|---|---|---|---|
-| 0x000 | `VERSION` | RO | `0x0001_0001` | [31:16] major, [15:0] minor (1.1 = `0x0001_0001`; 1.0 had no playback registers) |
+| 0x000 | `VERSION` | RO | `0x0001_0002` | [31:16] major, [15:0] minor (1.2 = `0x0001_0002`) |
 | 0x004 | `SRC_CLK_HZ` | RO | parameter | `src_clk` frequency in Hz (from BD parameter) |
 | 0x008 | `DP_CLK_HZ` | RO | parameter | datapath clock frequency in Hz |
 | 0x00C | `GLOBAL_CTRL` | RW | 0 | bit0 `SOFT_RST` (self-clearing; reads 1 while in progress) |
 | 0x010 | `TPG_CTRL` | RW | 0 | bit0 `ENABLE`, bit1 `SEQ_RST` (self-clearing, reads 0; seq := 0) |
 | 0x014 | `TPG_RATE_INC` | RW | 0 | Q1.31 beats/clock: `0x8000_0000` = 1 beat/clk (max; larger clamps) |
-| 0x018 | `TPG_SEQ_NEXT_LO` | RO | 0 | next sequence number to emit (low 32 bits; latches HI) |
-| 0x01C | `TPG_SEQ_NEXT_HI` | RO | 0 | next sequence number to emit (high 32 bits) |
+| 0x018 | `TPG_SEQ_NEXT_LO` | RO | 0 | sequence number of word 0 of the next beat to emit, in words (low 32 bits; latches HI) |
+| 0x01C | `TPG_SEQ_NEXT_HI` | RO | 0 | (high 32 bits) |
 | 0x020 | `ING_STATUS` | RW | 0 | bit0 `OVERFLOW` sticky (W1C) |
 | 0x024 | `ING_FIFO_HWM` | RW | 0 | FIFO high-water mark in beats; any write clears |
 | 0x028 | `ING_DROP_COUNT_LO` | RO | 0 | beats dropped (64-bit, low; latches HI) |
 | 0x02C | `ING_DROP_COUNT_HI` | RO | 0 | beats dropped (high) |
 | 0x030 | `ING_BEATS_IN_LO` | RO | 0 | beats offered by the source (64-bit, low; latches HI) |
 | 0x034 | `ING_BEATS_IN_HI` | RO | 0 | beats offered by the source (high) |
-| 0x038 | `ING_FIFO_DEPTH` | RO | parameter | FIFO depth in beats (parameter) |
+| 0x038 | `ING_FIFO_DEPTH` | RO | parameter | ingest FIFO depth in beats (`FIFO_DEPTH` parameter, 8192 = 256 KB) |
 | 0x040 | `PKT_CTRL` | RW | 0 | bit0 `ENABLE` (0→1 resets the beat-in-packet counter) |
 | 0x044 | `PKT_LEN` | RW | `0x0008_0000` | beats per packet (TLAST on the `PKT_LEN`-th beat) |
 | 0x048 | `PKT_BEATS_OUT_LO` | RO | 0 | beats delivered to the DMA (64-bit, low; latches HI) |
@@ -90,26 +97,35 @@ address plus the offset, for example `sudo devmem2 0x420010000 w` reads `VERSION
 | 0x068–0x06C | — | | 0 | reserved |
 | 0x070 | `CHK_BEATS_LO` | RO | 0 | beats accepted by the checker (64-bit, low; latches HI) |
 | 0x074 | `CHK_BEATS_HI` | RO | 0 | (high) |
-| 0x078 | `CHK_ERRORS_LO` | RO | 0 | pattern errors + backwards sequence numbers (64-bit, low; latches HI) |
+| 0x078 | `CHK_ERRORS_LO` | RO | 0 | bad beats + backwards sequence numbers (64-bit, low; latches HI) |
 | 0x07C | `CHK_ERRORS_HI` | RO | 0 | (high) |
 | 0x080 | `CHK_GAPS_LO` | RO | 0 | sequence gap events (64-bit, low; latches HI) |
 | 0x084 | `CHK_GAPS_HI` | RO | 0 | (high) |
-| 0x088 | `CHK_GAP_BEATS_LO` | RO | 0 | missing sequence numbers, summed (64-bit, low; latches HI) |
+| 0x088 | `CHK_GAP_BEATS_LO` | RO | 0 | missing beats, summed over the gap events (64-bit, low; latches HI) |
 | 0x08C | `CHK_GAP_BEATS_HI` | RO | 0 | (high) |
 | 0x090 | `CHK_UNDERFLOWS_LO` | RO | 0 | throttle ticks without data inside the stream (64-bit, low; latches HI) |
 | 0x094 | `CHK_UNDERFLOWS_HI` | RO | 0 | (high) |
-| 0x098 | `CHK_LAST_SEQ_LO` | RO | 0 | sequence number of the last good beat (64-bit, low; latches HI) |
+| 0x098 | `CHK_LAST_SEQ_LO` | RO | 0 | sequence number of word 0 of the last good beat, in words (64-bit, low; latches HI) |
 | 0x09C | `CHK_LAST_SEQ_HI` | RO | 0 | (high) |
 | 0x0A0 | `EGR_CTRL` | RW | 0 | bit0 `FLUSH` (accept and discard the DMA stream) |
-| 0x0A4 | `EGR_FIFO_DEPTH` | RO | parameter | egress FIFO depth in beats (`EGR_FIFO_DEPTH` parameter, 4096 = 64 KB) |
+| 0x0A4 | `EGR_FIFO_DEPTH` | RO | parameter | egress FIFO depth in beats (`EGR_FIFO_DEPTH` parameter, 4096 = 128 KB) |
 | 0x0A8 | `EGR_BEATS_IN_LO` | RO | 0 | beats written into the egress FIFO (64-bit, low; latches HI) |
 | 0x0AC | `EGR_BEATS_IN_HI` | RO | 0 | (high) |
 | 0x0B0 | `EGR_DISCARD_LO` | RO | 0 | beats discarded while `FLUSH` = 1 (64-bit, low; latches HI) |
 | 0x0B4 | `EGR_DISCARD_HI` | RO | 0 | (high) |
 | 0x0B8 | `EGR_FIFO_LEVEL` | RO | 0 | current egress FIFO fill level in beats (DMA side) |
-| 0x0BC | — | | 0 | reserved |
+| 0x0BC | `BEAT_BYTES` | RO | parameter | bytes per fabric beat = `DATA_WIDTH` / 8 (16 or 32; 32 on the reference designs) |
 
 ## Register details
+
+**`VERSION`** — major 1, minor 2. The major number changes only with an incompatible
+change. Minor 1 added the playback registers (`CHK_*`, `EGR_*`), minor 2 the `BEAT_BYTES`
+register. On a bitstream with minor 0 or 1, `BEAT_BYTES` reads 0 and the datapath is
+128 bits wide (16-byte beats); the driver handles both.
+
+**`BEAT_BYTES`** — the width of the fabric datapath in bytes, from the `DATA_WIDTH`
+parameter of `fdrec_core`. Everything that converts beats to bytes uses it: rates
+(`× BEAT_BYTES`), `PKT_LEN` (= buffer size / `BEAT_BYTES`), FIFO sizes.
 
 **`TPG_CTRL`** — `ENABLE` starts and stops the test pattern generator. Writing 1 to
 `SEQ_RST` sets the sequence number back to 0; the bit always reads 0. These bits only control
@@ -133,11 +149,12 @@ after enabling is beat 1 of a new `PKT_LEN`-beat packet. `PKT_BEATS_OUT` is not 
 enable; use `SOFT_RST` for that.
 
 **`PKT_LEN`** — the packetizer reads it at the start of each packet, so a change takes effect at
-the next packet boundary. 0 is treated as 1. The driver sets `PKT_LEN = buffer_size / 16`, so
-every DMA descriptor ends exactly on a buffer boundary. The AXI DMA buffer length register is
-26 bits wide, so a buffer (and a packet) can be up to 64 MB − 16 B (`PKT_LEN` ≤ 4 194 303).
+the next packet boundary. 0 is treated as 1. The driver sets `PKT_LEN = buffer_size / BEAT_BYTES`,
+so every DMA descriptor ends exactly on a buffer boundary. The AXI DMA buffer length register is
+26 bits wide, so a buffer (and a packet) can be up to 64 MB − 32 B with 32-byte beats
+(`PKT_LEN` ≤ 2 097 151).
 
-## Playback registers (1.1)
+## Playback registers
 
 **`CHK_CTRL.ENABLE`** — while 1, the checker (`fdrec_check` in `user_data_sink`) asserts
 `TREADY` on the ticks of its rate throttle; while 0, `TREADY` is 0, so the egress FIFO fills and
@@ -151,23 +168,29 @@ until 0. The first good beat after the reset sets the expected sequence number, 
 playback may start at any sequence number. `RESET` does not clear the `EGR_*` counters.
 
 **`CHK_RATE_INC`** — the sink's consumption rate, the same Q1.31 format as `TPG_RATE_INC`:
-`rate_bps = CHK_RATE_INC / 2^31 × SRC_CLK_HZ × 16`. Default `0x8000_0000` (every `src_clk`
-cycle, 3.2 GB/s). The playback app's `--rate` option programs it.
+`rate_bps = CHK_RATE_INC / 2^31 × SRC_CLK_HZ × BEAT_BYTES`. Default `0x8000_0000` (every
+`src_clk` cycle, 8.0 GB/s with 32-byte beats at 250 MHz). The playback app's `--rate` option
+programs it.
 
-**Checker counters.** For every accepted beat, `seq = TDATA[63:0]`:
+**Checker counters.** A beat carries `W` = `BEAT_BYTES` / 16 words; word *k* is
+`TDATA[128k+127:128k]`. For every accepted beat, `seq` = word 0's `[63:0]`:
 
-* `TDATA[127:64] ≠ ~TDATA[63:0]` → `CHK_ERRORS` += 1. The beat is not used for sequence
-  tracking (the expected number just advances by one), so one corrupted beat is exactly one
-  error and never a false gap.
+* a **bad beat** — any word with `[127:64] ≠ ~[63:0]`, or a word *k* whose `[63:0]` is not
+  `seq + k` → `CHK_ERRORS` += 1, once per beat however many of its words are bad. The beat is
+  not used for sequence tracking (the expected number just advances by `W`), so one corrupted
+  beat is exactly one error and never a false gap.
 * otherwise, against the expected number: equal → OK; `seq` greater → `CHK_GAPS` += 1 and
-  `CHK_GAP_BEATS` += `seq − expected`; `seq` smaller → `CHK_ERRORS` += 1. Then
-  expected := `seq + 1` and `CHK_LAST_SEQ` := `seq`.
+  `CHK_GAP_BEATS` += (`seq − expected`) / `W`; `seq` smaller → `CHK_ERRORS` += 1. Then
+  expected := `seq + W` and `CHK_LAST_SEQ` := `seq`.
 * `CHK_UNDERFLOWS` counts throttle ticks on which `TVALID` was low, after the first beat, while
   enabled. Ticks are only committed when another beat follows, so the idle time after the
   last beat of a playback is never counted: a complete playback that never starved reads 0.
 
-For a playback of a TPG recording: `CHK_GAP_BEATS` equals the file header's drop count,
-`CHK_BEATS` equals the number of beats in the file, and `CHK_ERRORS` = 0.
+`CHK_BEATS`, `CHK_ERRORS`, `CHK_GAPS`, `CHK_GAP_BEATS` and `CHK_UNDERFLOWS` are in beats,
+`CHK_LAST_SEQ` in words. For a playback of a TPG recording made with the same `BEAT_BYTES`:
+`CHK_GAP_BEATS` equals the file header's drop count, `CHK_BEATS` equals the number of beats in
+the file, `CHK_ERRORS` = 0, and the first sequence number of the playback is
+`CHK_LAST_SEQ + W − (CHK_BEATS + CHK_GAP_BEATS) × W`.
 
 **`EGR_CTRL.FLUSH`** — while 1, the egress FIFO accepts every beat from the DMA and discards it
 (`TREADY` = 1, nothing written; `EGR_DISCARD` counts them). The data already in the FIFO stays.

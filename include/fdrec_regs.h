@@ -6,15 +6,23 @@
  *
  * One AXI-Lite register block (4 KB) holds every fdrec_* register: the test
  * pattern generator (fdrec_tpg), the ingest CDC FIFO (fdrec_ingest), the
- * packetizer (fdrec_packetizer) and, since version 1.1, the playback path:
- * the checker (fdrec_check) and the egress CDC FIFO (fdrec_egress). All registers are 32 bits wide; offsets are
- * byte offsets from the block's base address.
+ * packetizer (fdrec_packetizer) and the playback path: the checker
+ * (fdrec_check) and the egress CDC FIFO (fdrec_egress). All registers are 32
+ * bits wide; offsets are byte offsets from the block's base address.
  *
  * This header is shared by the RTL documentation, the Linux kernel driver and
  * the user-space apps, so it is plain C (macros only, no includes) and must
  * stay in sync with docs/source/register_map.md and Vivado/src/hdl.
  *
  * Access types: RO = read-only, RW = read/write, W1C = write 1 to clear.
+ *
+ * Beats and words. The fabric datapath is DATA_WIDTH bits wide (an RTL
+ * parameter, 128 or 256; 256 on the reference designs). One transfer on it is
+ * a fabric BEAT of BEAT_BYTES = DATA_WIDTH / 8 bytes (register BEAT_BYTES,
+ * 0x0BC). The test pattern is defined on 16-byte WORDS: a beat carries
+ * BEAT_BYTES / 16 consecutive words. Every beat counter (ING_*, PKT_*, CHK_*,
+ * EGR_*), FIFO depth, level and high-water mark, and PKT_LEN, is in fabric
+ * beats; the sequence numbers (TPG_SEQ_NEXT, CHK_LAST_SEQ) are in words.
  *
  * 64-bit counters are split in a _LO and a _HI register. Reading _LO latches
  * the matching HI half; read _LO first, then _HI, to get a coherent 64-bit
@@ -34,15 +42,15 @@
  * read returns a value at most ~0.5 us old. Within one snapshot
  * ING_BEATS_IN, ING_DROP_COUNT and TPG_SEQ_NEXT are mutually consistent.
  *
- * Reset values: TPG_RATE_INC = 0, PKT_LEN = 0x0008_0000 (8 MB / 16 B),
- * CHK_RATE_INC = 0x8000_0000, all enables 0, all counters 0.
+ * Reset values: TPG_RATE_INC = 0, PKT_LEN = 0x0008_0000, CHK_RATE_INC =
+ * 0x8000_0000, all enables 0, all counters 0.
  *
- * Playback (1.1): SOFT_RST also resets the egress FIFO, clears the CHK_* and
- * EGR_* counters, disables the checker and clears EGR_CTRL.FLUSH
- * (CHK_RATE_INC keeps its value). While SOFT_RST is in progress, beats from the
- * DMA MM2S are accepted and discarded, so a soft reset never wedges the DMA.
- * The CHK_* counters come from the src_clk domain as one coherent snapshot
- * (at most ~0.5 us old), like TPG_SEQ_NEXT / ING_*.
+ * Playback: SOFT_RST also resets the egress FIFO, clears the CHK_* and EGR_*
+ * counters, disables the checker and clears EGR_CTRL.FLUSH (CHK_RATE_INC
+ * keeps its value). While SOFT_RST is in progress, beats from the DMA MM2S are
+ * accepted and discarded, so a soft reset never wedges the DMA. The CHK_*
+ * counters come from the src_clk domain as one coherent snapshot (at most
+ * ~0.5 us old), like TPG_SEQ_NEXT / ING_*.
  */
 
 #ifndef FDREC_REGS_H
@@ -55,15 +63,16 @@
 #define FDREC_VERSION_MAJOR_SHIFT       16
 #define FDREC_VERSION_MAJOR_MASK        0xFFFF0000u
 #define FDREC_VERSION_MINOR_MASK        0x0000FFFFu
-#define FDREC_VERSION_1_0               0x00010000u   /* version 1.0 */
+#define FDREC_VERSION_1_0               0x00010000u   /* 1.0: record path */
 #define FDREC_VERSION_1_1               0x00010001u   /* 1.1: + playback (CHK_, EGR_) */
-#define FDREC_VERSION_EXPECTED          FDREC_VERSION_1_1
+#define FDREC_VERSION_1_2               0x00010002u   /* 1.2: + BEAT_BYTES (DATA_WIDTH) */
+#define FDREC_VERSION_EXPECTED          FDREC_VERSION_1_2
 
 /* ---------------------------------------------------------------------------
  * Global
  * ------------------------------------------------------------------------- */
 
-/* 0x000 VERSION (RO): [31:16] major, [15:0] minor; 1.0 = 0x0001_0000 */
+/* 0x000 VERSION (RO): [31:16] major, [15:0] minor; 1.2 = 0x0001_0002 */
 #define FDREC_VERSION                   0x000
 
 /* 0x004 SRC_CLK_HZ (RO): src_clk frequency in Hz (from a BD parameter) */
@@ -81,8 +90,12 @@
 /* ---------------------------------------------------------------------------
  * Test pattern generator (fdrec_tpg)
  *
- * Each 128-bit beat carries TDATA[63:0] = seq, TDATA[127:64] = ~seq, where seq
- * increments on every emitted beat (including beats later dropped by ingest).
+ * The pattern is defined on 16-byte words: word[63:0] = seq, word[127:64] =
+ * ~seq. A fabric beat carries BEAT_BYTES / 16 consecutive words, word k in
+ * TDATA[128k+127:128k] with seq + k, so seq advances by BEAT_BYTES / 16 per
+ * emitted beat (including beats later dropped by ingest). The byte stream is
+ * the same for every DATA_WIDTH: word n of a recording carries seq n (plus the
+ * words of dropped beats before it).
  * ------------------------------------------------------------------------- */
 
 /* 0x010 TPG_CTRL (RW) */
@@ -93,16 +106,17 @@
 /*
  * 0x014 TPG_RATE_INC (RW): average output rate as a Q1.31 fraction of one
  * beat per src_clk cycle. 0x8000_0000 = 1 beat/clock (maximum); larger values
- * clamp to the maximum. With 16-byte beats:
+ * clamp to the maximum.
  *
- *     rate_bps = TPG_RATE_INC / 2^31 * SRC_CLK_HZ * 16
- *     TPG_RATE_INC = rate_bps * 2^31 / (SRC_CLK_HZ * 16)
+ *     rate_bps = TPG_RATE_INC / 2^31 * SRC_CLK_HZ * BEAT_BYTES
+ *     TPG_RATE_INC = rate_bps * 2^31 / (SRC_CLK_HZ * BEAT_BYTES)
  */
 #define FDREC_TPG_RATE_INC              0x014
 #define FDREC_TPG_RATE_INC_ONE          0x80000000u /* 1 beat per src_clk */
 #define FDREC_TPG_RATE_INC_FRAC_BITS    31
 
-/* 0x018/0x01C TPG_SEQ_NEXT (RO, 64-bit): next sequence number to emit */
+/* 0x018/0x01C TPG_SEQ_NEXT (RO, 64-bit): sequence number of word 0 of the
+ * next beat to emit (in words; advances by BEAT_BYTES / 16 per beat) */
 #define FDREC_TPG_SEQ_NEXT_LO           0x018       /* read first: latches HI */
 #define FDREC_TPG_SEQ_NEXT_HI           0x01C
 
@@ -127,7 +141,8 @@
 #define FDREC_ING_BEATS_IN_LO           0x030       /* read first: latches HI */
 #define FDREC_ING_BEATS_IN_HI           0x034
 
-/* 0x038 ING_FIFO_DEPTH (RO): ingest FIFO depth in beats (RTL parameter) */
+/* 0x038 ING_FIFO_DEPTH (RO): ingest FIFO depth in beats (RTL parameter
+ * FIFO_DEPTH; 8192 beats = 256 KB on the reference designs) */
 #define FDREC_ING_FIFO_DEPTH            0x038
 
 /* ---------------------------------------------------------------------------
@@ -141,9 +156,10 @@
 #define FDREC_PKT_CTRL_ENABLE           (1u << 0)
 
 /* 0x044 PKT_LEN (RW): beats per packet; TLAST on the PKT_LEN-th beat.
- * The driver sets PKT_LEN = buffer_size / FDREC_BEAT_BYTES. The value is
- * sampled at the start of each packet (a change takes effect at the next
- * packet boundary); 0 is treated as 1. */
+ * The driver sets PKT_LEN = buffer_size / BEAT_BYTES. The value is sampled at
+ * the start of each packet (a change takes effect at the next packet
+ * boundary); 0 is treated as 1. The AXI DMA's 26-bit buffer length register
+ * limits a packet to PKT_LEN * BEAT_BYTES <= 2^26 - 1 bytes. */
 #define FDREC_PKT_LEN                   0x044
 
 /* 0x048/0x04C PKT_BEATS_OUT (RO, 64-bit): beats delivered to the DMA */
@@ -151,13 +167,15 @@
 #define FDREC_PKT_BEATS_OUT_HI          0x04C
 
 /* ---------------------------------------------------------------------------
- * Playback checker (fdrec_check, user_data_sink hierarchy) -- version 1.1
+ * Playback checker (fdrec_check, user_data_sink hierarchy)
  *
  * Models a DAC-like sink on src_clk: TREADY is asserted on a rate-throttle
  * tick (Q1.31, same scheme as the TPG). Each accepted beat is checked against
- * the TPG pattern (TDATA[127:64] == ~TDATA[63:0], TDATA[63:0] = seq).
- * Offsets 0x060-0x0BF are reserved for the playback path; unlisted offsets in
- * that range read 0.
+ * the TPG pattern: every word must satisfy word[127:64] == ~word[63:0], and
+ * word k must carry seq(word 0) + k. Sequence tracking is per beat on the seq
+ * of word 0 (in words); all CHK_ counters except CHK_LAST_SEQ are in beats.
+ * Offsets 0x060-0x0BF hold the playback path and BEAT_BYTES; unlisted offsets
+ * in that range read 0.
  * ------------------------------------------------------------------------- */
 
 /* 0x060 CHK_CTRL (RW) */
@@ -175,7 +193,7 @@
  * fraction of one beat per src_clk cycle. 0x8000_0000 = ready every clock
  * (maximum, default); larger values clamp.
  *
- *     rate_bps = CHK_RATE_INC / 2^31 * SRC_CLK_HZ * 16
+ *     rate_bps = CHK_RATE_INC / 2^31 * SRC_CLK_HZ * BEAT_BYTES
  */
 #define FDREC_CHK_RATE_INC              0x064
 #define FDREC_CHK_RATE_INC_ONE          0x80000000u
@@ -186,19 +204,23 @@
 #define FDREC_CHK_BEATS_LO              0x070       /* read first: latches HI */
 #define FDREC_CHK_BEATS_HI              0x074
 
-/* 0x078/0x07C CHK_ERRORS (RO, 64-bit): beats with TDATA[127:64] != ~TDATA[63:0]
- * (such a beat is not used for sequence tracking: expected just advances by
- * one) plus pattern-good beats whose seq is LOWER than expected (backwards) */
+/* 0x078/0x07C CHK_ERRORS (RO, 64-bit): bad beats -- a beat in which any word
+ * fails word[127:64] == ~word[63:0] or does not carry seq(word 0) + k (such a
+ * beat counts once and is not used for sequence tracking: the expected seq
+ * just advances by one beat) -- plus good beats whose seq is LOWER than
+ * expected (backwards) */
 #define FDREC_CHK_ERRORS_LO             0x078       /* read first: latches HI */
 #define FDREC_CHK_ERRORS_HI             0x07C
 
-/* 0x080/0x084 CHK_GAPS (RO, 64-bit): events where seq > expected */
+/* 0x080/0x084 CHK_GAPS (RO, 64-bit): gap events (good beats whose seq is
+ * greater than expected) */
 #define FDREC_CHK_GAPS_LO               0x080       /* read first: latches HI */
 #define FDREC_CHK_GAPS_HI               0x084
 
-/* 0x088/0x08C CHK_GAP_BEATS (RO, 64-bit): sum of (seq - expected) over all gap
- * events = missing sequence numbers. For a TPG recording this equals the
- * file header's drop count. A gap before the first beat is not counted. */
+/* 0x088/0x08C CHK_GAP_BEATS (RO, 64-bit): missing beats, the sum over all
+ * gap events of (seq - expected) / (BEAT_BYTES / 16). For a TPG recording made
+ * with the same BEAT_BYTES this equals the recording's drop count. A gap
+ * before the first beat is not counted. */
 #define FDREC_CHK_GAP_BEATS_LO          0x088       /* read first: latches HI */
 #define FDREC_CHK_GAP_BEATS_HI          0x08C
 
@@ -209,14 +231,15 @@
 #define FDREC_CHK_UNDERFLOWS_LO         0x090       /* read first: latches HI */
 #define FDREC_CHK_UNDERFLOWS_HI         0x094
 
-/* 0x098/0x09C CHK_LAST_SEQ (RO, 64-bit): seq of the last pattern-good beat */
+/* 0x098/0x09C CHK_LAST_SEQ (RO, 64-bit): seq of word 0 of the last good beat
+ * (in words) */
 #define FDREC_CHK_LAST_SEQ_LO           0x098       /* read first: latches HI */
 #define FDREC_CHK_LAST_SEQ_HI           0x09C
 
 /* ---------------------------------------------------------------------------
  * Egress (fdrec_egress): dp_clk -> src_clk CDC FIFO between the DMA MM2S and
  * the sink. Lossless: when it is full, the DMA is backpressured. TLAST from
- * the DMA is passed to the sink; TKEEP is ignored (whole 16-byte beats).
+ * the DMA is passed to the sink; TKEEP is ignored (whole beats).
  * EGR_ counters are cleared only by SOFT_RST (not by CHK_CTRL.RESET).
  * ------------------------------------------------------------------------- */
 
@@ -228,9 +251,10 @@
 #define FDREC_EGR_CTRL_FLUSH            (1u << 0)
 
 /* 0x0A4 EGR_FIFO_DEPTH (RO): egress FIFO depth in beats (RTL parameter
- * EGR_FIFO_DEPTH; 4096 = 64 KB on the reference design). At a sink rate R the
- * full FIFO bridges a DMA pause of EGR_FIFO_DEPTH * 16 / R seconds (65 us at
- * 1 GB/s, 20 us at 3.2 GB/s) -- e.g. the gap between MM2S descriptors. */
+ * EGR_FIFO_DEPTH; 4096 beats = 128 KB on the reference designs). At a sink
+ * rate R the full FIFO bridges a DMA pause of EGR_FIFO_DEPTH * BEAT_BYTES / R
+ * seconds (131 us at 1 GB/s, 16 us at 8 GB/s) -- e.g. the gap between MM2S
+ * descriptors. */
 #define FDREC_EGR_FIFO_DEPTH            0x0A4
 
 /* 0x0A8/0x0AC EGR_BEATS_IN (RO, 64-bit): beats written into the egress FIFO */
@@ -245,12 +269,16 @@
  * from the DMA side; a full FIFO can read EGR_FIFO_DEPTH + 1 */
 #define FDREC_EGR_FIFO_LEVEL            0x0B8
 
-/* 0x0BC: reserved (reads 0) */
+/* 0x0BC BEAT_BYTES (RO, 1.2): bytes per fabric beat = DATA_WIDTH / 8 (16 or
+ * 32; 32 on the reference designs). Reads 0 on register map 1.0/1.1, whose
+ * datapath is 128 bits: use FDREC_BEAT_BYTES_DEFAULT then. */
+#define FDREC_BEAT_BYTES_REG            0x0BC
 
 /* ---------------------------------------------------------------------------
  * Datapath constants
  * ------------------------------------------------------------------------- */
 
-#define FDREC_BEAT_BYTES                16          /* 128-bit AXI-Stream beat */
+#define FDREC_WORD_BYTES                16          /* one test-pattern word */
+#define FDREC_BEAT_BYTES_DEFAULT        16          /* BEAT_BYTES reads 0 (map < 1.2) */
 
 #endif /* FDREC_REGS_H */

@@ -4,8 +4,9 @@
  *
  * fdrec_file.h -- on-disk format of an FPGA Drive Recorder file.
  *
- * A recording is a 4096-byte header followed by the raw 128-bit beats exactly
- * as the AXI DMA wrote them to memory (16 bytes per beat, little-endian):
+ * A recording is a 4096-byte header followed by the raw fabric beats exactly
+ * as the AXI DMA wrote them to memory (beat_bytes bytes per beat: 32 on a
+ * 256-bit datapath, 16 on a 128-bit one; little-endian):
  *
  *     offset 0      struct fdrec_file_header (4096 bytes, zero-padded)
  *     offset 4096   beat 0, beat 1, ... (data_bytes bytes)
@@ -14,8 +15,12 @@
  * once at the start (flags without COMPLETE) and rewrites it at the end with
  * the final counts and FDREC_FILE_FLAG_COMPLETE.
  *
- * With the test pattern generator as the source, beat n of the data carries
- * lower = first_seq + n + (beats dropped before it), upper = ~lower.
+ * With the test pattern generator as the source, the data is a sequence of
+ * 16-byte pattern WORDS whatever the beat size: word n carries
+ * lower = first_seq + n + (words of the beats dropped before it),
+ * upper = ~lower. A beat holds beat_bytes / 16 consecutive words, so a
+ * recording is byte-identical for 16- and 32-byte beats; a dropped beat
+ * leaves a gap of beat_bytes / 16 words, and drop_count counts beats.
  *
  * All multi-byte fields are little-endian. The structure is packed and its
  * size is checked at compile time.
@@ -39,7 +44,7 @@ struct fdrec_file_header {
 	char     magic[8];          /* "FDREC\0\0\0" */
 	uint32_t header_version;    /* FDREC_FILE_HEADER_VERSION */
 	uint32_t header_size;       /* 4096 */
-	uint32_t beat_bytes;        /* 16 */
+	uint32_t beat_bytes;        /* bytes per fabric beat: 32 (256-bit), 16 (128-bit) */
 	uint32_t flags;             /* FDREC_FILE_FLAG_* */
 	uint32_t design_version;    /* VERSION register */
 	uint64_t src_clk_hz;
@@ -47,8 +52,8 @@ struct fdrec_file_header {
 	uint64_t start_time_ns;     /* CLOCK_REALTIME at start */
 	uint64_t stop_time_ns;      /* written at stop */
 	uint64_t data_bytes;        /* written at stop */
-	uint64_t drop_count;        /* written at stop */
-	uint64_t first_seq;         /* first sequence number captured, if TPG */
+	uint64_t drop_count;        /* beats dropped, written at stop */
+	uint64_t first_seq;         /* sequence number of the first word, if TPG */
 	char     target[32];        /* e.g. "uzev", NUL-padded */
 	char     hostname[64];      /* NUL-padded */
 	uint8_t  reserved[FDREC_FILE_HEADER_SIZE - 8 - 5 * 4 - 7 * 8 - 32 - 64];

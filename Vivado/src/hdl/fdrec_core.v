@@ -13,6 +13,11 @@
 //
 //   s_axi (dp_clk): AXI4-Lite register block (fdrec_regs), see include/fdrec_regs.h
 //
+// All streams are DATA_WIDTH bits wide (128 or 256): a fabric beat is
+// DATA_WIDTH / 8 bytes (register BEAT_BYTES). FIFO_DEPTH / EGR_FIFO_DEPTH and
+// every beat counter are in beats. The test pattern is defined on 16-byte
+// words, DATA_WIDTH / 128 per beat (see fdrec_tpg / fdrec_check).
+//
 // The test pattern generator lives OUTSIDE this module (user_data_source
 // hierarchy) so that it can be replaced. Its controls are provided here as
 // src_clk-domain ports:
@@ -22,7 +27,8 @@
 //                 the source-side soft-reset window
 //   tpg_rate_inc  32-bit quasi-static value, transferred with xpm_cdc_handshake
 //                 (always a coherent word; a new value arrives within ~20 cycles)
-//   tpg_seq_next  64-bit readback (input); sampled together with the ingest
+//   tpg_seq_next  64-bit readback (input; seq of word 0 of the next beat, in
+//                 16-byte pattern words); sampled together with the ingest
 //                 counters into one coherent snapshot (xpm_cdc_handshake,
 //                 continuously refreshed, at most a few hundred ns old)
 //
@@ -50,10 +56,11 @@
 `timescale 1ns / 1ps
 
 module fdrec_core #(
-  parameter integer SRC_CLK_HZ = 200000000,
+  parameter integer DATA_WIDTH = 256,         // 128 or 256
+  parameter integer SRC_CLK_HZ = 250000000,
   parameter integer DP_CLK_HZ  = 250000000,
-  parameter integer FIFO_DEPTH = 16384,
-  parameter integer EGR_FIFO_DEPTH = 4096
+  parameter integer FIFO_DEPTH = 8192,        // ingest FIFO, beats
+  parameter integer EGR_FIFO_DEPTH = 4096     // egress FIFO, beats
 ) (
   // Source clock domain
   (* X_INTERFACE_INFO = "xilinx.com:signal:clock:1.0 src_clk CLK" *)
@@ -72,26 +79,26 @@ module fdrec_core #(
   input  wire          dp_resetn,
 
   // Data source stream (src_clk); tready is always 1
-  input  wire [127:0]  s_axis_tdata,
+  input  wire [DATA_WIDTH-1:0]   s_axis_tdata,
   input  wire          s_axis_tvalid,
   output wire          s_axis_tready,
 
   // Stream to the AXI DMA S2MM (dp_clk)
-  output wire [127:0]  m_axis_tdata,
-  output wire [15:0]   m_axis_tkeep,
+  output wire [DATA_WIDTH-1:0]   m_axis_tdata,
+  output wire [DATA_WIDTH/8-1:0] m_axis_tkeep,
   output wire          m_axis_tlast,
   output wire          m_axis_tvalid,
   input  wire          m_axis_tready,
 
   // Playback stream from the AXI DMA MM2S (dp_clk); TKEEP is ignored
-  input  wire [127:0]  s_axis_mm2s_tdata,
-  input  wire [15:0]   s_axis_mm2s_tkeep,
+  input  wire [DATA_WIDTH-1:0]   s_axis_mm2s_tdata,
+  input  wire [DATA_WIDTH/8-1:0] s_axis_mm2s_tkeep,
   input  wire          s_axis_mm2s_tlast,
   input  wire          s_axis_mm2s_tvalid,
   output wire          s_axis_mm2s_tready,
 
   // Playback stream to the data sink (src_clk); TLAST passed through
-  output wire [127:0]  m_axis_snk_tdata,
+  output wire [DATA_WIDTH-1:0]   m_axis_snk_tdata,
   output wire          m_axis_snk_tlast,
   output wire          m_axis_snk_tvalid,
   input  wire          m_axis_snk_tready,
@@ -135,6 +142,12 @@ module fdrec_core #(
   input  wire [63:0]   chk_last_seq
 );
 
+  generate
+    if (DATA_WIDTH != 128 && DATA_WIDTH != 256) begin : g_bad_width
+      DATA_WIDTH_must_be_128_or_256 u_param_error ();
+    end
+  endgenerate
+
   localparam integer CNT_W   = $clog2(FIFO_DEPTH) + 1;
   localparam integer SYNC_FF = 4;
   localparam integer EGR_CNT_W = $clog2(EGR_FIFO_DEPTH) + 1;
@@ -167,7 +180,8 @@ module fdrec_core #(
     .FIFO_DEPTH (FIFO_DEPTH),
     .CNT_W      (CNT_W),
     .EGR_FIFO_DEPTH (EGR_FIFO_DEPTH),
-    .EGR_CNT_W  (EGR_CNT_W)
+    .EGR_CNT_W  (EGR_CNT_W),
+    .BEAT_BYTES (DATA_WIDTH / 8)
   ) u_regs (
     .clk             (dp_clk),
     .resetn          (dp_resetn),
@@ -422,13 +436,14 @@ module fdrec_core #(
   assign tpg_rate_inc = src_rate_inc;
 
   // Ingest
-  wire [127:0] fifo_tdata;
+  wire [DATA_WIDTH-1:0] fifo_tdata;
   wire         fifo_tvalid;
   wire         fifo_tready;
   wire [63:0]  beats_in;
   wire [63:0]  drop_count;
 
   fdrec_ingest #(
+    .DATA_WIDTH (DATA_WIDTH),
     .FIFO_DEPTH (FIFO_DEPTH)
   ) u_ingest (
     .src_clk       (src_clk),
@@ -537,6 +552,7 @@ module fdrec_core #(
   end
 
   fdrec_egress #(
+    .DATA_WIDTH (DATA_WIDTH),
     .FIFO_DEPTH (EGR_FIFO_DEPTH)
   ) u_egress (
     .dp_clk        (dp_clk),
@@ -562,7 +578,9 @@ module fdrec_core #(
   // ===========================================================================
   // dp_clk domain: packetizer
   // ===========================================================================
-  fdrec_packetizer u_pkt (
+  fdrec_packetizer #(
+    .DATA_WIDTH (DATA_WIDTH)
+  ) u_pkt (
     .clk           (dp_clk),
     .srst          (~dp_resetn | dp_srst),
     .enable        (pkt_enable),

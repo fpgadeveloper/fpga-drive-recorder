@@ -172,7 +172,7 @@ def legend(ax, x, y):
             ha="left", va="center", fontsize=7.0, color=TXT)
     harrow(ax, x, x + 6.0, y - 7.2, "", C_USER_FILL, C_USER_EDGE, bh=0.8, hh=1.5,
            hl=1.2)
-    ax.text(x + 7.5, y - 7.2, "AXI4-Stream, 128 bit",
+    ax.text(x + 7.5, y - 7.2, "AXI4-Stream, 256 bit",
             ha="left", va="center", fontsize=7.0, color=TXT)
 
 
@@ -189,16 +189,16 @@ FAMILIES = {
         title="FPGA Drive Recorder  —  Zynq UltraScale+ designs",
         proc_title="Zynq\nUltraScale+\nPS",
         proc_body="Arm Cortex-A53\n\nLinux (Yocto / EDF)\nfdrec driver\nfdrec / fdplay\n\n"
-                  "pl_clk0  100 MHz\npl_clk1  250 MHz\n(dp_clk)\npl_clk2  200 MHz\n(src_clk)",
+                  "pl_clk0  100 MHz\npl_clk1  250 MHz\n(dp_clk)\npl_clk2  250 MHz\n(src_clk)\npl_clk3  ≤333 MHz\n(HP2)",
         ddr="PS DDR4",
         ddr_body="ring of 2 MB-hugepage\nbuffers (default 32 x 8 MB)",
         ctl_lbl="M_AXI_HPM0_FPD → periph_intercon_0  (AXI-Lite)",
-        smc="axi_smc_dma\nSmartConnect\n\nto PS port\nS_AXI_HP2_FPD\n128 bit,\nnon-coherent",
+        smc="axi_smc_dma\nSmartConnect\n256 → 128 bit\n\nto PS port\nS_AXI_HP2_FPD\n128 bit, pl_clk3\nnon-coherent",
         dma_title="axi_dma_0",
         dma_body="AXI DMA, scatter-gather\n\nS2MM  record\nMM2S  playback\nSG  descriptor fetch\n\n"
-                 "128-bit stream + MM\nburst 256, 26-bit length\n64-bit addresses",
+                 "256-bit stream + MM\nburst 128, 26-bit length\n64-bit addresses",
         dp_clk="dp_clk  250 MHz",
-        src_clk="src_clk  200 MHz",
+        src_clk="src_clk  250 MHz",
         host_lbl=("M_AXI_HPM0_FPD", "M_AXI_HPM1_FPD"),
         nvme_lbl=("S_AXI_HP0_FPD", "S_AXI_HP1_FPD"),
         rp_title=("xdma_0", "xdma_1"),
@@ -217,16 +217,16 @@ FAMILIES = {
         title="FPGA Drive Recorder  —  Versal designs  (vck190_fmcp1)",
         proc_title="Versal\nCIPS",
         proc_body="versal_cips_0\nArm Cortex-A72\n\nLinux (Yocto / EDF)\nfdrec driver\nfdrec / fdplay\n\n"
-                  "pl0_ref_clk 250 MHz\npl1_ref_clk 250 MHz\n(dp_clk)\npl2_ref_clk 200 MHz\n(src_clk)",
+                  "pl0_ref_clk 250 MHz\npl1_ref_clk 250 MHz\n(dp_clk)\npl2_ref_clk 250 MHz\n(src_clk)",
         ddr="DDR4 via NoC",
         ddr_body="axi_noc_0: hugepage ring\nvia S09_AXI → MC_2",
         ctl_lbl="M_AXI_FPD → smc_m_axi_fpd  (AXI-Lite: fdrec 0x4_2001_0000, DMA 0x4_2000_0000)",
-        smc="axi_smc_dma\nSmartConnect\n\nto NoC port\nS09_AXI\n(MC_2),\nnon-coherent",
+        smc="axi_smc_dma\nSmartConnect\n\nto NoC port\nS09_AXI\n256 bit (MC_2),\nnon-coherent",
         dma_title="axi_dma_0",
         dma_body="AXI DMA, scatter-gather\n\nS2MM  record\nMM2S  playback\nSG  descriptor fetch\n\n"
-                 "128-bit stream + MM\nburst 256, 26-bit length\n64-bit addresses",
+                 "256-bit stream + MM\nburst 128, 26-bit length\n64-bit addresses",
         dp_clk="dp_clk  250 MHz (pl1_ref_clk)",
-        src_clk="src_clk  200 MHz (pl2_ref_clk)",
+        src_clk="src_clk  250 MHz (pl2_ref_clk)",
         host_lbl=("M_AXI_FPD (BAR)\nM_AXI_LPD (CSR)", "M_AXI_FPD (BAR)\nM_AXI_LPD (CSR)"),
         nvme_lbl=("NoC S08_AXI", "NoC S08_AXI"),
         rp_title=("qdma_0  +  qdma_support_0", "qdma_1  +  qdma_support_1"),
@@ -291,10 +291,10 @@ def draw_block(fam):
                "packetizer", "TLAST every\nPKT_LEN beats",
                title_fs=7.8, body_fs=6.4, title_dy=1.9, z=3)
     titled_box(ax, cdc_x - 2.0, rec_y - 4.5, 13.0, 9.0, C_MAC_FILL, C_MAC_EDGE,
-               "ingest FIFO", "async, 64 KB\nfull → drop\n+ count",
+               "ingest FIFO", "async, 256 KB\nfull → drop\n+ count",
                title_fs=7.8, body_fs=6.2, title_dy=1.9, z=3)
     titled_box(ax, core_x + 1.0, ply_y - 4.5, 31.0, 9.0, C_MAC_FILL, C_MAC_EDGE,
-               "egress FIFO", "async, 64 KB, lossless:\nbackpressure to the DMA",
+               "egress FIFO", "async, 128 KB, lossless:\nbackpressure to the DMA",
                title_fs=7.8, body_fs=6.2, title_dy=1.9, z=3)
     box(ax, core_x + 1.0, top_y0 + 1.5, 31.0, 5.5, C_CTRL_FILL, C_CTRL_EDGE,
         "AXI-Lite register block (fdrec_regs.h)", fs=6.6, z=3)
@@ -472,7 +472,8 @@ def draw_custom_source():
     # default content
     titled_box(ax, 34.0, 66.0, 40.0, 17.0, C_CTRL_FILL, C_CTRL_EDGE,
                "Default content: fdrec_tpg",
-               "test pattern: TDATA[63:0] = seq, TDATA[127:64] = ~seq\n"
+               "test pattern: two 16-byte words per 256-bit beat,\n"
+               "word = {~seq, seq}; TDATA[127:0] seq, [255:128] seq+1\n"
                "rate = TPG_RATE_INC (Q1.31 beats per src_clk)\n"
                "uses tpg_enable / tpg_seq_rst / tpg_rate_inc,\ndrives tpg_seq_next",
                title_fs=8.0, body_fs=6.3, title_dy=2.2, ls=(0, (3, 2)))
@@ -484,7 +485,7 @@ def draw_custom_source():
                "Your logic", "ADC / sensor\ninterface,\nprocessing\n\nW-bit samples",
                title_fs=8.2, body_fs=6.6, title_dy=2.4)
     titled_box(ax, 57.0, 32.0, 20.0, 24.0, C_USER_FILL, C_USER_EDGE,
-               "Packer\n(optional)", "for W < 128:\naxis_dwidth_\nconverter or a\nshift register\n\n"
+               "Packer\n(optional)", "for W < 256:\naxis_dwidth_\nconverter or a\nshift register\n\n"
                                     "first sample in\nTDATA[W-1:0]",
                title_fs=8.0, body_fs=6.3, title_dy=3.4, ls=(0, (3, 2)))
     harrow(ax, 53.0, 57.0, 45.0, "", C_USER_FILL, C_USER_EDGE, bh=0.9, hh=1.7, hl=1.1)
@@ -494,12 +495,12 @@ def draw_custom_source():
            hh=1.7, hl=1.1, fs=6.6, lab_dy=2.8)
 
     # pins on the right boundary (M_AXIS drawn as a block arrow through it)
-    ax.text(hx1 + 4.0, 49.5, "TDATA[127:0], TVALID\n(one TVALID cycle per beat)",
+    ax.text(hx1 + 4.0, 49.5, "TDATA[255:0], TVALID\n(one TVALID cycle per beat)",
             ha="left", va="center", fontsize=6.0, color=C_MUTED)
     pin(ax, hx1, 40.0, "TREADY", True, color=C_WARN,
         desc="always 1 — ignore it, never wait for it", desc_color=C_WARN)
     pin(ax, hx1, 26.0, "src_clk", True, color=C_REFCLK_LINE,
-        desc="pl_clk2 (200 MHz) by default,\nor your clock", desc_dy=3.2)
+        desc="pl_clk2 (250 MHz) by default,\nor your clock", desc_dy=3.2)
     pin(ax, hx1, 19.0, "src_resetn", True, desc="from rst_src_clk (same clock)")
     pin(ax, hx1, 82.0, "tpg_enable", True, fs=6.4, color=C_MUTED,
         desc="optional: use as run / stop")
@@ -520,7 +521,7 @@ def draw_custom_source():
             va="center", fontsize=9.6, weight="bold", color=TXT)
     titled_box(ax, cx0 + 2.0, 35.0, cx1 - cx0 - 4.0, 22.0, C_MAC_FILL, C_MAC_EDGE,
                "ingest: async FIFO",
-               "src_clk → dp_clk (250 MHz)\n64 KB (FIFO_DEPTH 4096 beats)\n\n"
+               "src_clk → dp_clk (250 MHz)\n256 KB (FIFO_DEPTH 8192 beats)\n\n"
                "TREADY held at 1\nFIFO full: the beat is dropped\nand counted (ING_DROP_COUNT)",
                title_fs=8.2, body_fs=6.5, title_dy=2.4)
     titled_box(ax, cx0 + 2.0, 61.0, cx1 - cx0 - 4.0, 18.0, C_CTRL_FILL, C_CTRL_EDGE,
@@ -541,7 +542,7 @@ def draw_custom_source():
                "data is never delayed or corrupted.\n"
                "A recording is valid only if its drop count is 0 (fdrec exits 2 otherwise).  No framing on the source side: "
                "put frame markers or timestamps inside TDATA.\n"
-               "Bytes are recorded as they appear on TDATA, little-endian (TDATA[7:0] is the first byte of each 16-byte beat).",
+               "Bytes are recorded as they appear on TDATA, little-endian (TDATA[7:0] is the first byte of each 32-byte beat).",
                title_fs=8.2, body_fs=6.7, title_dy=2.0)
     ax.text(85.0, 96.0, "Replacing the test pattern generator with your own data source",
             ha="center", va="center", fontsize=12.5, weight="bold", color=TXT)
@@ -561,7 +562,7 @@ def draw_custom_sink():
                title_fs=7.8, body_fs=6.3, title_dy=2.0)
     titled_box(ax, cx0 + 2.0, 35.0, cx1 - cx0 - 4.0, 22.0, C_MAC_FILL, C_MAC_EDGE,
                "egress: async FIFO",
-               "dp_clk (250 MHz) → src_clk\n64 KB (EGR_FIFO_DEPTH 4096)\n\n"
+               "dp_clk (250 MHz) → src_clk\n128 KB (EGR_FIFO_DEPTH 4096)\n\n"
                "lossless: when full, the DMA\nwaits.  Bridges the DMA pause\n"
                "at each buffer boundary",
                title_fs=8.2, body_fs=6.5, title_dy=2.4)
@@ -582,13 +583,13 @@ def draw_custom_sink():
     # pins on the left boundary
     harrow(ax, cx1 - 2.0, hx0 + 3.0, 45.0, "", C_USER_FILL, C_USER_EDGE, bh=0.9,
            hh=1.7, hl=1.1)
-    ax.text(hx0 - 4.0, 49.0, "TDATA[127:0], TVALID, TLAST\n(TLAST = end of a DMA buffer)",
+    ax.text(hx0 - 4.0, 49.0, "TDATA[255:0], TVALID, TLAST\n(TLAST = end of a DMA buffer)",
             ha="right", va="center", fontsize=6.0, color=C_MUTED, linespacing=1.15)
     ax.text(hx0 + 3.6, 48.0, "S_AXIS", ha="left", va="center", fontsize=6.6, color=TXT)
     pin(ax, hx0, 40.0, "TREADY", False, side="left", color=C_WARN,
         desc="your rate control\n(backpressure allowed)", desc_color=C_WARN)
     pin(ax, hx0, 26.0, "snk_clk", True, side="left", color=C_REFCLK_LINE,
-        desc="= src_clk (200 MHz)")
+        desc="= src_clk (250 MHz)")
     pin(ax, hx0, 19.0, "snk_resetn", True, side="left", desc="from rst_src_clk")
     pin(ax, hx0, 82.0, "chk_enable", True, side="left", fs=6.4, color=C_MUTED,
         desc="optional: run / stop")
@@ -603,7 +604,7 @@ def draw_custom_sink():
     titled_box(ax, 98.0, 64.0, 40.0, 19.0, C_CTRL_FILL, C_CTRL_EDGE,
                "Default content: fdrec_check",
                "TREADY on the ticks of a Q1.31 rate throttle\n(CHK_RATE_INC; models a DAC)\n"
-               "checks the TPG pattern and sequence;\ncounts errors, gaps, underflows",
+               "checks both words of every beat;\ncounts errors, gaps, underflows",
                title_fs=8.0, body_fs=6.3, title_dy=2.2, ls=(0, (3, 2)))
     ax.text(118.0, 61.5, "remove it, keep the hierarchy pins", ha="center",
             va="center", fontsize=7.2, color=C_WARN, weight="bold")
@@ -611,7 +612,7 @@ def draw_custom_sink():
     # replacement content
     titled_box(ax, 92.0, 30.0, 21.0, 26.0, C_USER_FILL, C_USER_EDGE,
                "Clock / width\n(optional)", "axis_data_fifo\n(independent\nclocks) for\nyour own clock\n\n"
-                                            "axis_dwidth_\nconverter\n16 B → your width",
+                                            "axis_dwidth_\nconverter\n32 B → your width",
                title_fs=7.8, body_fs=6.2, title_dy=3.4, ls=(0, (3, 2)))
     titled_box(ax, 117.0, 30.0, 21.0, 26.0, C_USER_FILL, C_USER_EDGE,
                "Your logic", "DAC / transmitter\ninterface\n\nTREADY = your\nconsumption rate\n\n"
@@ -797,7 +798,7 @@ def draw_record_path():
 
     # AXI DMA side
     titled_box(ax, 27.0, 46.0, 12.0, 28.0, C_MAC_FILL, C_MAC_EDGE, "axi_smc_dma",
-               "SmartConnect\n\nS2MM + SG\nmasters", title_fs=7.6, body_fs=6.4,
+               "SmartConnect\n\nS2MM + SG\nmasters\n\n256 → 128 bit\n→ pl_clk3", title_fs=7.6, body_fs=6.4,
                title_dy=2.2)
     titled_box(ax, 44.0, 46.0, 18.0, 28.0, C_GT_FILL, C_GT_EDGE, "axi_dma_0",
                "S2MM channel\nscatter-gather\n\none descriptor =\none buffer;\n"
@@ -814,14 +815,14 @@ def draw_record_path():
     ax.text((cx0 + cx1) / 2, 75.5, "fdrec_core", ha="center", va="center",
             fontsize=9.8, weight="bold", color=TXT)
     titled_box(ax, 72.0, 46.0, 22.0, 24.0, C_MAC_FILL, C_MAC_EDGE, "packetizer",
-               "TLAST on every\nPKT_LEN-th beat\n(PKT_LEN = buffer\nsize / 16)\n\n"
+               "TLAST on every\nPKT_LEN-th beat\n(PKT_LEN = buffer\nsize / 32)\n\n"
                "ENABLE = 0: TVALID\nheld low\nPKT_BEATS_OUT", title_fs=8.2, body_fs=6.3,
                title_dy=2.4, z=3)
     titled_box(ax, 102.0, 46.0, 26.0, 24.0, C_MAC_FILL, C_MAC_EDGE, "ingest FIFO",
-               "xpm_fifo_async\n4096 x 128 bit (64 KB)\n\nING_FIFO_HWM\n(high-water mark)",
+               "xpm_fifo_async\n8192 x 256 bit (256 KB)\n32 µs at 8 GB/s\n\nING_FIFO_HWM\n(high-water mark)",
                title_fs=8.2, body_fs=6.3, title_dy=2.4, z=3)
     harrow(ax, 102.0, 94.0, 58.0, "", C_USER_FILL, C_USER_EDGE, bh=0.9, hh=1.7, hl=1.1)
-    harrow(ax, 72.0, 62.0, 58.0, "AXIS 128b\n+ TLAST", C_USER_FILL, C_USER_EDGE,
+    harrow(ax, 72.0, 62.0, 58.0, "AXIS 256b\n+ TLAST", C_USER_FILL, C_USER_EDGE,
            bh=1.0, hh=1.9, hl=1.2, fs=6.0, lab_dy=4.0)
     # drop point (at the FIFO input)
     titled_box(ax, 104.0, 21.0, 26.0, 18.0, "#FBF3EC", C_CLK_EDGE, "drop point",
@@ -841,15 +842,15 @@ def draw_record_path():
     line(ax, [(cdc, 40.0), (cdc, 73.0)], C_REFCLK_LINE, lw=1.2, ls=(0, (3, 2)), z=2.5)
     line(ax, [(cdc, 80.0), (cdc, 73.0)], C_REFCLK_LINE, lw=1.2, ls=(0, (3, 2)), z=2.5)
     clk_tag(ax, (27.0 + cdc) / 2, 80.5, "dp_clk  250 MHz  (DMA side)")
-    clk_tag(ax, (cdc + 168.0) / 2, 80.5, "src_clk  200 MHz  (source side)")
+    clk_tag(ax, (cdc + 168.0) / 2, 80.5, "src_clk  250 MHz  (source side)")
     line(ax, [(27.0, 79.0), (cdc, 79.0)], C_REFCLK_LINE, lw=1.0)
     line(ax, [(cdc, 79.0), (168.0, 79.0)], C_REFCLK_LINE, lw=1.0, ls=(0, (3, 2)))
 
     # source
     titled_box(ax, 140.0, 46.0, 28.0, 24.0, C_USER_FILL, C_USER_EDGE,
-               "user_data_source", "fdrec_tpg (default)\n\nTDATA[63:0] = seq\nTDATA[127:64] = ~seq\n"
-               "rate: TPG_RATE_INC", title_fs=8.4, body_fs=6.4, title_dy=2.4, lw=1.3)
-    harrow(ax, 140.0, 128.0, 58.0, "AXIS 128b", C_USER_FILL, C_USER_EDGE, bh=1.0,
+               "user_data_source", "fdrec_tpg (default)\n\n2 words per beat, word k:\n[63:0] = seq + k\n[127:64] = ~(seq + k)\n"
+               "rate: TPG_RATE_INC\n(max 8.0 GB/s)", title_fs=8.4, body_fs=6.4, title_dy=2.4, lw=1.3)
+    harrow(ax, 140.0, 128.0, 58.0, "AXIS 256b", C_USER_FILL, C_USER_EDGE, bh=1.0,
            hh=1.9, hl=1.2, fs=6.0, lab_dy=3.0)
     ax.text(134.0, 52.5, "TREADY = 1\n(ignored)", ha="center", va="center",
             fontsize=5.9, color=C_WARN, linespacing=1.1)
@@ -880,7 +881,7 @@ def draw_play_path():
                "mm2s_introut\n→ pl_ps_irq0[7]\n(GIC SPI 96):\none IRQ per\nplayed buffer")
 
     titled_box(ax, 27.0, 46.0, 12.0, 28.0, C_MAC_FILL, C_MAC_EDGE, "axi_smc_dma",
-               "SmartConnect\n\nMM2S + SG\nmasters", title_fs=7.6, body_fs=6.4,
+               "SmartConnect\n\nMM2S + SG\nmasters\n\n256 → 128 bit\n→ pl_clk3", title_fs=7.6, body_fs=6.4,
                title_dy=2.2)
     titled_box(ax, 44.0, 46.0, 18.0, 28.0, C_GT_FILL, C_GT_EDGE, "axi_dma_0",
                "MM2S channel\nscatter-gather\n\none buffer = one\npacket (TLAST on\nits last beat)",
@@ -896,7 +897,7 @@ def draw_play_path():
     ax.text((cx0 + cx1) / 2, 75.5, "fdrec_core", ha="center", va="center",
             fontsize=9.8, weight="bold", color=TXT)
     titled_box(ax, 72.0, 46.0, 42.0, 24.0, C_MAC_FILL, C_MAC_EDGE, "egress FIFO",
-               "xpm_fifo_async, 4096 x 129 bit (64 KB of data + TLAST)\n"
+               "xpm_fifo_async, 4096 x 257 bit (128 KB of data + TLAST)\n"
                "lossless: when full, TREADY to the DMA goes low\n"
                "bridges the DMA pause at each buffer boundary\n\n"
                "EGR_FIFO_LEVEL, EGR_BEATS_IN\n"
@@ -904,7 +905,7 @@ def draw_play_path():
                title_fs=8.2, body_fs=6.2, title_dy=2.4, z=3)
     box(ax, 72.0, 17.0, 42.0, 12.0, C_CTRL_FILL, C_CTRL_EDGE,
         "AXI-Lite register block (fdrec_regs.h)\nCHK_* (sink control + counters), EGR_*", fs=6.4, z=3)
-    harrow(ax, 62.0, 72.0, 58.0, "AXIS 128b\n+ TLAST", C_USER_FILL, C_USER_EDGE,
+    harrow(ax, 62.0, 72.0, 58.0, "AXIS 256b\n+ TLAST", C_USER_FILL, C_USER_EDGE,
            bh=1.0, hh=1.9, hl=1.2, fs=6.0, lab_dy=4.0)
     # backpressure (TREADY) arrows, right to left
     route(ax, [(72.0, 52.5), (62.0, 52.5)], C_WARN, lw=1.2)
@@ -914,7 +915,7 @@ def draw_play_path():
     line(ax, [(cdc, 40.0), (cdc, 73.0)], C_REFCLK_LINE, lw=1.2, ls=(0, (3, 2)), z=2.5)
     line(ax, [(cdc, 80.0), (cdc, 73.0)], C_REFCLK_LINE, lw=1.2, ls=(0, (3, 2)), z=2.5)
     clk_tag(ax, (27.0 + cdc) / 2, 80.5, "dp_clk  250 MHz  (DMA side)")
-    clk_tag(ax, (cdc + 168.0) / 2, 80.5, "src_clk  200 MHz  (sink side)")
+    clk_tag(ax, (cdc + 168.0) / 2, 80.5, "src_clk  250 MHz  (sink side)")
     line(ax, [(27.0, 79.0), (cdc, 79.0)], C_REFCLK_LINE, lw=1.0)
     line(ax, [(cdc, 79.0), (168.0, 79.0)], C_REFCLK_LINE, lw=1.0, ls=(0, (3, 2)))
 
@@ -922,13 +923,13 @@ def draw_play_path():
                "user_data_sink",
                "fdrec_check (default), models a DAC:\n"
                "TREADY on the ticks of a Q1.31 rate\nthrottle (CHK_RATE_INC)\n\n"
-               "per beat, seq = TDATA[63:0]:\n"
-               "CHK_ERRORS: upper != ~lower,\n  or seq going backwards\n"
-               "CHK_GAPS / CHK_GAP_BEATS:\n  missing sequence numbers\n"
+               "per beat (2 words), seq = word 0:\n"
+               "CHK_ERRORS: a word with upper !=\n  ~lower or != seq + k, or seq\n  going backwards (once per beat)\n"
+               "CHK_GAPS / CHK_GAP_BEATS:\n  missing beats\n"
                "CHK_UNDERFLOWS: tick with\n  no data after the first beat\n"
                "CHK_BEATS, CHK_LAST_SEQ",
                title_fs=8.4, body_fs=6.2, title_dy=2.4, lw=1.3)
-    harrow(ax, 114.0, 128.0, 58.0, "AXIS 128b\n+ TLAST", C_USER_FILL, C_USER_EDGE,
+    harrow(ax, 114.0, 128.0, 58.0, "AXIS 256b\n+ TLAST", C_USER_FILL, C_USER_EDGE,
            bh=1.0, hh=1.9, hl=1.2, fs=6.0, lab_dy=4.0)
     route(ax, [(128.0, 52.5), (114.0, 52.5)], C_WARN, lw=1.2)
     ax.text(121.0, 50.6, "TREADY\n(rate)", ha="center", va="top", fontsize=5.9,

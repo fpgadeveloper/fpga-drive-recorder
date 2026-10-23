@@ -58,8 +58,9 @@ recorder.
 
 * The carrier has one HPC FMC connector, which supports two SSDs, each with an independent
   4-lane PCIe Gen3 interface. A Gen4 SSD links at Gen3 x4. The design has the same datapath
-  and clocking as the `zcu106_hpc0` design. The benchmarks were measured on `zcu106_hpc0` and
-  `vck190_fmcp1` (see [Benchmarks](benchmarks)).
+  and clocking as the `zcu106_hpc0` design, except that the AXI DMA's port into DDR
+  (`S_AXI_HP2_FPD`) runs at 327.77 MHz (5.24 GB/s peak). The benchmarks were measured on
+  `zcu106_hpc0` and `vck190_fmcp1` (see [Benchmarks](benchmarks)).
 * Boot mode: to boot from the SD card, set DIP switch SW2 on the UltraZed-EV SOM to 1000
   (1=ON, 2=OFF, 3=OFF, 4=OFF).
 * The Linux console is the PS UART 0 interface on the carrier's USB-UART, at 115200 baud.
@@ -72,9 +73,13 @@ recorder.
 * The `zcu106_hpc0` design uses the HPC0 FMC connector, which supports two SSDs, each with an
   independent 4-lane PCIe Gen3 interface (XDMA Root Ports). A Gen4 SSD links at Gen3 x4 (the
   Samsung 980 PRO 1TB and the Sabrent Rocket 2230 1TB: `8GT/s (downgraded)`). Inside an SSD's
-  cache a slot runs at up to the Gen3 x4 link's rate (~2.94-3.04 GB/s write, ~2.9-3.2 GB/s read,
-  measured with both drives); two SSDs in RAID0 record at the generator's
-  3.2 GB/s (see [Where the bottlenecks are](benchmarks.md#where-the-bottlenecks-are)).
+  cache a slot runs at up to the Gen3 x4 link's rate (~2.94 GB/s write with the Sabrent,
+  ~3.04 GB/s with the 980 PRO; ~3.1-3.2 GB/s read), so one drive records 2500 MB/s (Sabrent) or
+  3000 MB/s (980 PRO) and plays back 3000 MB/s; two SSDs in RAID0 record 3500 / 4500 MB/s over
+  32 GB (4500 / 5000 MB/s with 64 buffers) and play back 3500 / 4000 MB/s. The AXI DMA reaches
+  the PS DDR through `S_AXI_HP2_FPD` at 322.19 MHz (5.16 GB/s peak), which caps the recorder at
+  ~5000 MB/s on this board; the 980 PRO pair reaches it (see
+  [Where the bottlenecks are](benchmarks.md#where-the-bottlenecks-are)).
 * The design builds with the free Vivado Standard Edition (no license needed).
 
 ### VCK190
@@ -82,7 +87,12 @@ recorder.
 * The `vck190_fmcp1` design uses the FMCP1 connector (FMC+), which supports two SSDs, each
   with an independent 4-lane PCIe Gen4 interface. Gen4 SSDs link at Gen4 x4 (measured at
   16 GT/s with the Sabrent Rocket 2230 1TB on the M.2 M-key Stack FMC and the Samsung 980 PRO
-  1TB on the FPGA Drive FMC Gen4), Gen3 SSDs at Gen3 x4.
+  1TB on the FPGA Drive FMC Gen4), Gen3 SSDs at Gen3 x4. One drive records 4500 MB/s over
+  32 GB (either drive) and plays back 6000 MB/s (980 PRO) or 4500 MB/s (Sabrent); a RAID0 pair
+  records 6500 MB/s (980 PRO) or 4000 MB/s (Sabrent), 7000 MB/s with 16 MB buffers (both), and
+  plays back 6000 / 5500 MB/s. Without an SSD the fabric path sustains 7750 MB/s recording and
+  7500 MB/s playback (see
+  [Where the bottlenecks are](benchmarks.md#where-the-bottlenecks-are)).
 * VADJ: the board's system controller normally sets the FMC VADJ supply from the FMC card's
   EEPROM. The Linux image does not depend on it: its U-Boot boot script enables VADJ at
   1.5 V (IR38164 regulator over I2C) before Linux starts, and prints

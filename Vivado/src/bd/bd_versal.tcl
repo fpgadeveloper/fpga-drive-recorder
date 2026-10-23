@@ -430,7 +430,7 @@ if {$is_vpk120 || $is_vpk180} {
 # S05_AXI - PMC_NOC_AXI_0 - PS PMC       - 1
 # S06_AXI - FPD_AXI_NOC_1 - PS Non-Coh   - 0
 # S07_AXI - FPD_AXI_NOC_0 - PS Non-Coh   - 0
-# S08_AXI - BRIDGE        - PL           - 3
+# S08_AXI - BRIDGE        - PL           - 3   (QDMA root ports' M_AXI_BRIDGE, the SSD DMA)
 #
 # Unlike AMD's PL QDMA RP CED that this design is based on, there is no M00_AXI
 # NSU looping back into the PS via NOC_FPD_AXI_0. The CED attaches that NSU
@@ -463,7 +463,10 @@ set_property -dict [list CONFIG.CATEGORY {ps_rpu} CONFIG.CONNECTIONS {MC_3 {read
 set_property -dict [list CONFIG.CONNECTIONS {MC_2 {read_bw {5} write_bw {5} read_avg_burst {4} write_avg_burst {4} initial_boot {true} }}] [get_bd_intf_pins /axi_noc_0/S05_AXI]
 set_property -dict [list CONFIG.CATEGORY {ps_nci} CONFIG.CONNECTIONS {MC_0 {read_bw {5} write_bw {5} read_avg_burst {4} write_avg_burst {4} initial_boot {true} }}] [get_bd_intf_pins /axi_noc_0/S06_AXI]
 set_property -dict [list CONFIG.CATEGORY {ps_nci} CONFIG.CONNECTIONS {MC_0 {read_bw {5} write_bw {5} read_avg_burst {4} write_avg_burst {4} initial_boot {true} }}] [get_bd_intf_pins /axi_noc_0/S07_AXI]
-set_property -dict [list CONFIG.CONNECTIONS {MC_1 {read_bw {1720} write_bw {1720} read_avg_burst {4} write_avg_burst {4} }}] [get_bd_intf_pins /axi_noc_0/S08_AXI]
+# S08_AXI (256 bits at pl0_ref_clk = 8 GB/s per direction) carries the NVMe DMA of
+# both SSDs (a Gen4 x4 link moves up to ~7 GB/s); its NoC QoS request is 7000 MB/s
+# per direction (a bandwidth request to the NoC compiler, not a cap)
+set_property -dict [list CONFIG.CONNECTIONS {MC_1 {read_bw {7000} write_bw {7000} read_avg_burst {4} write_avg_burst {4} }}] [get_bd_intf_pins /axi_noc_0/S08_AXI]
 
 # Connect FPD AXI NOC interfaces and clocks to NoC
 connect_bd_intf_net [get_bd_intf_pins versal_cips_0/FPD_AXI_NOC_0] [get_bd_intf_pins axi_noc_0/S06_AXI]
@@ -1329,17 +1332,21 @@ if {$dual_design} {
 # FPGA Drive Recorder datapath (Versal)
 # ##########################################################
 #
-#  user_data_source (src_clk)          fdrec_core                    dp_clk
-#  [fdrec_tpg] --AXIS 128b--> [ingest FIFO -> packetizer] --AXIS--> axi_dma_0 S2MM
-#                                  ^ AXI-Lite regs                    | M_AXI_S2MM + M_AXI_SG
-#                                  |                                  v
-#  M_AXI_FPD -> smc_m_axi_fpd -+-> fdrec_core/S_AXI              axi_smc_dma -> axi_noc_0 (PL NMU) -> DDR MC
-#                              +-> axi_dma_0/S_AXI_LITE
+#  user_data_source (src_clk 250)      fdrec_core                     dp_clk 250
+#  [fdrec_tpg] --AXIS 256b--> [ingest FIFO -> packetizer] --AXIS 256b--> axi_dma_0 S2MM
+#                                  ^ AXI-Lite regs                         | M_AXI_S2MM 256b + M_AXI_SG
+#                                  |                                       v
+#  M_AXI_FPD -> smc_m_axi_fpd -+-> fdrec_core/S_AXI      axi_smc_dma -> axi_noc_0 (PL NMU, 256b @ dp_clk,
+#                              +-> axi_dma_0/S_AXI_LITE    8.0 GB/s, QoS 8000/8000 MB/s) -> DDR MC
 #
-# Playback (register map 1.1):
+# Playback:
 #
-#  axi_dma_0 MM2S --AXIS 128b (dp_clk)--> fdrec_core [egress FIFO] --AXIS (src_clk)-->
-#  user_data_sink [fdrec_check]   (M_AXI_MM2S -> axi_smc_dma -> axi_noc_0 -> DDR MC)
+#  axi_dma_0 MM2S --AXIS 256b (dp_clk)--> fdrec_core [egress FIFO] --AXIS 256b (src_clk)-->
+#  user_data_sink [fdrec_check]   (M_AXI_MM2S 256b -> axi_smc_dma -> axi_noc_0 -> DDR MC)
+#
+# Datapath width: fdrec_data_width (256) on fdrec_tpg, fdrec_core and fdrec_check;
+# 256 bits x 250 MHz = 8.0 GB/s from the source, through the DMA and the NoC port,
+# into the sink.
 #
 # The user_data_source / user_data_sink hierarchies are the documented
 # insertion points for a customer's own data source / sink (see
@@ -1349,26 +1356,28 @@ if {$dual_design} {
 # Versal specifics:
 #   CIPS PL1 ref clock = 250 MHz : dp_clk  (AXI DMA, packetizer, ingest read side,
 #                                  NoC PL port, fdrec registers)
-#   CIPS PL2 ref clock = 200 MHz : src_clk (test pattern generator / user data
-#                                  source and sink, ingest write side)
+#   CIPS PL2 ref clock = 250 MHz : src_clk (test pattern generator / user data
+#                                  source and sink, ingest write side, egress read side)
 #   The DMA masters reach DDR through a dedicated NoC slave port (PL NMU) that is
 #   routed straight to the DDR memory controller: non-coherent, like HP2 on ZynqMP.
 #   The PS DDR on Versal lives at 0x0 (2 GB) and above 4 GB (eg. 0x500_0000_0000
 #   on the VCK190 DIMM), so the DMA uses 64-bit addressing.
 
-# Enable PL1 (250 MHz) and PL2 (200 MHz) reference clocks. CIPS merges these
+# Enable PL1 (250 MHz) and PL2 (250 MHz) reference clocks. CIPS merges these
 # keys into the per-board PS_PMC_CONFIG above.
 set_property CONFIG.PS_PMC_CONFIG { \
   PS_USE_PMCPL_CLK1 {1} \
   PMC_CRP_PL1_REF_CTRL_FREQMHZ {250} \
   PS_USE_PMCPL_CLK2 {1} \
-  PMC_CRP_PL2_REF_CTRL_FREQMHZ {200} \
+  PMC_CRP_PL2_REF_CTRL_FREQMHZ {250} \
 } [get_bd_cells versal_cips_0]
+
+set fdrec_data_width 256
 
 # Actual PL clock frequencies (the PMC PLL dividers may not hit the requested values exactly)
 set dp_clk_hz  [expr {int(round([get_property CONFIG.FREQ_HZ [get_bd_pins versal_cips_0/pl1_ref_clk]]))}]
 set src_clk_hz [expr {int(round([get_property CONFIG.FREQ_HZ [get_bd_pins versal_cips_0/pl2_ref_clk]]))}]
-puts "INFO: fdrec dp_clk (pl1_ref_clk) = $dp_clk_hz Hz, src_clk (pl2_ref_clk) = $src_clk_hz Hz"
+puts "INFO: fdrec dp_clk (pl1_ref_clk) = $dp_clk_hz Hz, src_clk (pl2_ref_clk) = $src_clk_hz Hz, DATA_WIDTH = $fdrec_data_width"
 
 # Resets for the two new clock domains
 create_bd_cell -type ip -vlnv xilinx.com:ip:proc_sys_reset rst_dp_clk
@@ -1388,6 +1397,7 @@ create_bd_pin -dir I user_data_source/tpg_seq_rst
 create_bd_pin -dir I -from 31 -to 0 user_data_source/tpg_rate_inc
 create_bd_pin -dir O -from 63 -to 0 user_data_source/tpg_seq_next
 create_bd_cell -type module -reference fdrec_tpg user_data_source/fdrec_tpg_0
+set_property CONFIG.DATA_WIDTH $fdrec_data_width [get_bd_cells user_data_source/fdrec_tpg_0]
 connect_bd_net [get_bd_pins user_data_source/src_clk] [get_bd_pins user_data_source/fdrec_tpg_0/src_clk]
 connect_bd_net [get_bd_pins user_data_source/src_resetn] [get_bd_pins user_data_source/fdrec_tpg_0/src_resetn]
 connect_bd_net [get_bd_pins user_data_source/tpg_enable] [get_bd_pins user_data_source/fdrec_tpg_0/tpg_enable]
@@ -1409,6 +1419,7 @@ foreach p $chk_counters {
   create_bd_pin -dir O -from 63 -to 0 user_data_sink/$p
 }
 create_bd_cell -type module -reference fdrec_check user_data_sink/fdrec_check_0
+set_property CONFIG.DATA_WIDTH $fdrec_data_width [get_bd_cells user_data_sink/fdrec_check_0]
 foreach p [concat {snk_clk snk_resetn chk_enable chk_reset chk_rate_inc} $chk_counters] {
   connect_bd_net [get_bd_pins user_data_sink/$p] [get_bd_pins user_data_sink/fdrec_check_0/$p]
 }
@@ -1436,9 +1447,10 @@ foreach p $chk_counters {
   create_bd_pin -dir I -from 63 -to 0 fdrec_core/$p
 }
 create_bd_cell -type module -reference fdrec_core fdrec_core/fdrec_core_0
-set_property -dict [list CONFIG.SRC_CLK_HZ $src_clk_hz \
+set_property -dict [list CONFIG.DATA_WIDTH $fdrec_data_width \
+  CONFIG.SRC_CLK_HZ $src_clk_hz \
   CONFIG.DP_CLK_HZ $dp_clk_hz \
-  CONFIG.FIFO_DEPTH {16384} \
+  CONFIG.FIFO_DEPTH {8192} \
   CONFIG.EGR_FIFO_DEPTH {4096}] [get_bd_cells fdrec_core/fdrec_core_0]
 foreach p [concat {src_clk src_resetn dp_clk dp_resetn tpg_enable tpg_seq_rst tpg_rate_inc tpg_seq_next \
                    chk_enable chk_reset chk_rate_inc} $chk_counters] {
@@ -1462,38 +1474,41 @@ foreach p [concat {chk_enable chk_reset chk_rate_inc} $chk_counters] {
   connect_bd_net [get_bd_pins fdrec_core/$p] [get_bd_pins user_data_sink/$p]
 }
 
-# AXI DMA: scatter-gather, S2MM (record) + MM2S (playback), 128-bit stream and
-# memory map, burst 256, 26-bit buffer length register, 64-bit addressing (the
-# DDR above the 2 GB low region is at 0x500_0000_0000 on the VCK190), no DRE
+# AXI DMA: scatter-gather, S2MM (record) + MM2S (playback), 256-bit stream and
+# memory map, burst 128 beats (4 KB), 26-bit buffer length register, 64-bit
+# addressing (the DDR above the 2 GB low region is at 0x500_0000_0000 on the
+# VCK190), no DRE
 create_bd_cell -type ip -vlnv xilinx.com:ip:axi_dma axi_dma_0
 set_property -dict [list CONFIG.c_include_sg {1} \
   CONFIG.c_include_mm2s {1} \
-  CONFIG.c_m_axi_mm2s_data_width {128} \
-  CONFIG.c_m_axis_mm2s_tdata_width {128} \
-  CONFIG.c_mm2s_burst_size {256} \
+  CONFIG.c_m_axi_mm2s_data_width $fdrec_data_width \
+  CONFIG.c_m_axis_mm2s_tdata_width $fdrec_data_width \
+  CONFIG.c_mm2s_burst_size {128} \
   CONFIG.c_include_mm2s_dre {0} \
   CONFIG.c_include_s2mm {1} \
   CONFIG.c_micro_dma {0} \
   CONFIG.c_sg_length_width {26} \
   CONFIG.c_sg_include_stscntrl_strm {0} \
   CONFIG.c_addr_width {64} \
-  CONFIG.c_s_axis_s2mm_tdata_width {128} \
-  CONFIG.c_m_axi_s2mm_data_width {128} \
-  CONFIG.c_s2mm_burst_size {256} \
+  CONFIG.c_s_axis_s2mm_tdata_width $fdrec_data_width \
+  CONFIG.c_m_axi_s2mm_data_width $fdrec_data_width \
+  CONFIG.c_s2mm_burst_size {128} \
   CONFIG.c_include_s2mm_dre {0}] [get_bd_cells axi_dma_0]
 connect_bd_intf_net [get_bd_intf_pins fdrec_core/M_AXIS] [get_bd_intf_pins axi_dma_0/S_AXIS_S2MM]
 connect_bd_intf_net [get_bd_intf_pins axi_dma_0/M_AXIS_MM2S] [get_bd_intf_pins fdrec_core/S_AXIS_MM2S]
 
 # DMA masters -> SmartConnect -> new NoC slave port (PL NMU) -> DDR memory controller.
-# 128 bit x 250 MHz = 4000 MB/s per direction at the NMU; the NoC QoS request
-# reserves that in both directions (record = write, playback = read).
+# The NMU is 256 bits wide at dp_clk: 256 bit x 250 MHz = 8000 MB/s per direction;
+# the NoC QoS request reserves that in both directions (record = write,
+# playback = read).
 set noc_si [get_property CONFIG.NUM_SI [get_bd_cells axi_noc_0]]
 set noc_clks [get_property CONFIG.NUM_CLKS [get_bd_cells axi_noc_0]]
 set noc_port [format "S%02d_AXI" $noc_si]
 set noc_aclk "aclk$noc_clks"
 set_property -dict [list CONFIG.NUM_SI [expr {$noc_si + 1}] CONFIG.NUM_CLKS [expr {$noc_clks + 1}]] [get_bd_cells axi_noc_0]
-set_property -dict [list CONFIG.CONNECTIONS {MC_2 {read_bw {4000} write_bw {4000} read_avg_burst {64} write_avg_burst {64}}}] [get_bd_intf_pins /axi_noc_0/$noc_port]
-puts "INFO: fdrec DMA -> axi_noc_0/$noc_port (clock $noc_aclk) -> MC_2"
+set_property -dict [list CONFIG.DATA_WIDTH $fdrec_data_width \
+  CONFIG.CONNECTIONS {MC_2 {read_bw {8000} write_bw {8000} read_avg_burst {64} write_avg_burst {64}}}] [get_bd_intf_pins /axi_noc_0/$noc_port]
+puts "INFO: fdrec DMA -> axi_noc_0/$noc_port (clock $noc_aclk, $fdrec_data_width bits) -> MC_2"
 
 create_bd_cell -type ip -vlnv xilinx.com:ip:smartconnect axi_smc_dma
 set_property -dict [list CONFIG.NUM_SI {3} CONFIG.NUM_MI {1}] [get_bd_cells axi_smc_dma]
@@ -1625,4 +1640,11 @@ foreach intr $intr_list {
 }
 
 validate_bd_design
+
+# The recorder's DMA path after parameter propagation: the NoC port must be
+# 256 bits at dp_clk
+foreach ip [list axi_smc_dma/S01_AXI axi_smc_dma/S02_AXI axi_smc_dma/M00_AXI axi_noc_0/$noc_port axi_noc_0/S08_AXI] {
+  set ipin [get_bd_intf_pins $ip]
+  puts "INFO: fdrec $ip DATA_WIDTH [get_property CONFIG.DATA_WIDTH $ipin] FREQ_HZ [get_property CONFIG.FREQ_HZ $ipin] CONNECTIONS [get_property CONFIG.CONNECTIONS $ipin]"
+}
 save_bd_design

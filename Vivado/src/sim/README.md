@@ -21,6 +21,14 @@ Contract for a testbench:
   correct or a line containing `FAIL` (plus the reason) on any error, then calls
   `$finish`. It must always terminate (use a watchdog that prints `FAIL` on timeout).
 
+* Optional: a line `// sim_runs: <run> <run> ...` runs the testbench once per `<run>`,
+  where `<run>` is a comma-separated list of top-level parameter overrides (passed to
+  `xelab -generic_top`). The `fdrec_*` testbenches use
+  `// sim_runs: DATA_WIDTH=128 DATA_WIDTH=256`, so `all` runs each of them for both
+  datapath widths; each run is reported on its own line, eg.
+  `PASS  tb_fdrec_core[DATA_WIDTH=256]`.
+
 A testbench passes only if its output contains `PASS` and no `FAIL`. `sim.tcl` exits
-with status 1 if any testbench fails. Work files and logs go to `Vivado/sim/<tb>/`
+with status 1 if any testbench (run) fails. Work files and logs go to
+`Vivado/sim/<tb>/`, or `Vivado/sim/<tb>_<run>/` for a testbench with `sim_runs`
 (gitignored).

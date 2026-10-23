@@ -4,6 +4,7 @@
 //
 // fdrec_packetizer -- TLAST framing and enable gate in front of the AXI DMA
 //
+//   * DATA_WIDTH-bit beats (128 or 256); TKEEP is all ones (whole beats).
 //   * Pass-through from the ingest FIFO (first-word-fall-through) to m_axis,
 //     through a 2-entry register slice (registered TREADY towards the FIFO).
 //   * TLAST is asserted on every pkt_len-th beat delivered on m_axis.
@@ -21,7 +22,9 @@
 
 `timescale 1ns / 1ps
 
-module fdrec_packetizer (
+module fdrec_packetizer #(
+  parameter integer DATA_WIDTH = 256    // 128 or 256
+) (
   input  wire          clk,
   input  wire          srst,
 
@@ -30,13 +33,13 @@ module fdrec_packetizer (
   output reg  [63:0]   beats_out,
 
   // From the ingest FIFO (FWFT)
-  input  wire [127:0]  s_tdata,
+  input  wire [DATA_WIDTH-1:0]   s_tdata,
   input  wire          s_tvalid,
   output wire          s_tready,
 
   // To the AXI DMA S2MM stream
-  output wire [127:0]  m_axis_tdata,
-  output wire [15:0]   m_axis_tkeep,
+  output wire [DATA_WIDTH-1:0]   m_axis_tdata,
+  output wire [DATA_WIDTH/8-1:0] m_axis_tkeep,
   output wire          m_axis_tlast,
   output wire          m_axis_tvalid,
   input  wire          m_axis_tready
@@ -45,7 +48,7 @@ module fdrec_packetizer (
   // ---------------------------------------------------------------------------
   // 2-entry register slice: d0 = output register, d1 = skid register
   // ---------------------------------------------------------------------------
-  reg [127:0] d0, d1;
+  reg [DATA_WIDTH-1:0] d0, d1;
   reg         v0, v1;
   reg         en_q;          // registered enable (gate)
 
@@ -113,7 +116,7 @@ module fdrec_packetizer (
   end
 
   assign m_axis_tdata  = d0;
-  assign m_axis_tkeep  = 16'hFFFF;
+  assign m_axis_tkeep  = {(DATA_WIDTH/8){1'b1}};
   assign m_axis_tvalid = v0 & en_q;
   assign m_axis_tlast  = rem_1;
 

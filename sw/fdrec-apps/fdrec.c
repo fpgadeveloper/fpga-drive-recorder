@@ -11,6 +11,11 @@
  *   WAIT_FILLED -> io_uring write at the next file offset -> on completion,
  *   RELEASE the buffer back to the DMA. Up to --qd writes in flight.
  *
+ * --no-write: WAIT_FILLED -> RELEASE at once, no file and no file I/O at all.
+ * The fabric -> DDR path (source, ingest FIFO, AXI DMA, HP port / NoC, the
+ * buffer recycling) runs exactly as in a recording, so its rate can be
+ * measured without an SSD.
+ *
  * Exit codes: 0 = recording complete with zero dropped beats,
  *             2 = recording complete but beats were dropped,
  *             1 = error.
@@ -37,6 +42,7 @@
 #include <endian.h>
 #include <liburing.h>
 
+#include "fdrec_regs.h"
 #include "fdrec_uapi.h"
 #include "fdrec_file.h"
 #include "fdrec_common.h"
@@ -55,9 +61,17 @@
 #define DEF_QD          8
 #define DEF_TIMEOUT     10.0            /* s without a completed buffer = stalled */
 #define HDR_SIZE        FDREC_FILE_HEADER_SIZE
-/* DMA restart gap at every buffer boundary (~15 us worst case on uzev): the
- * ingest FIFO must absorb it at the source rate */
-#define RESTART_GAP_US  15.0
+/*
+ * FIFO budget at a buffer boundary. With the meta-fdrec xilinx_dma patch the
+ * DMA runs from one buffer into the next by itself (driver >= 1.2 keeps it
+ * armed): the ingest FIFO only bridges the DMA's descriptor fetch and short
+ * DDR back-pressure. Should xilinx_dma be unable to append to the running
+ * chain (a kernel without the patch, or its descriptor ring out of order),
+ * it restarts the DMA from its interrupt handler instead, a pause of ~9 us
+ * with a 15-20 us tail measured on a Zynq UltraScale+ target. A FIFO that
+ * lasts less than that fallback pause at the source rate is worth a warning.
+ */
+#define FALLBACK_RESTART_US  15.0
 
 /* user_data of the io_uring poll request on the device */
 #define UD_POLL         ((uint64_t)-1)
@@ -84,6 +98,7 @@ struct opts {
 	uint64_t buf_size;
 	unsigned qd;
 	bool no_tpg;
+	bool no_write;          /* run the DMA ring, write nothing */
 	double stats;
 	double timeout;
 	bool quiet;
@@ -93,6 +108,7 @@ static void usage(FILE *f)
 {
 	fprintf(f,
 "Usage: fdrec [options] <output-file>\n"
+"       fdrec --no-write [options]\n"
 "\n"
 "Record the FPGA fabric data stream to <output-file> (zero-copy: DMA into\n"
 "hugepage buffers, O_DIRECT writes from the same buffers).\n"
@@ -107,6 +123,10 @@ static void usage(FILE *f)
 "  --buf-size <bytes>    buffer size, multiple of 2 MB (default 8M)\n"
 "  --qd <n>              io_uring queue depth: writes in flight (default %d)\n"
 "  --no-tpg              do not touch the generator (user's own data source)\n"
+"  --no-write            run the DMA ring but write nothing: each filled buffer\n"
+"                        is released at once, no file is created and no file\n"
+"                        I/O is issued (measures the fabric -> DDR path alone;\n"
+"                        give no <output-file>; --qd is ignored)\n"
 "  --timeout <sec>       stall watchdog: abort cleanly when no buffer completes\n"
 "                        for this long (default %.0f)\n"
 "  --stats <sec>         live stats interval, 0 = off (default 1)\n"
@@ -116,7 +136,10 @@ static void usage(FILE *f)
 "  -h, --help            this help\n"
 "\n"
 "Without --size or --duration, records until Ctrl-C. The file is a 4096-byte\n"
-"header followed by the raw 16-byte beats; check it with fdverify.\n"
+"header followed by the raw data exactly as the DMA wrote it (whole fabric\n"
+"beats of the design's width, 32 bytes on a 256-bit datapath); check it with\n"
+"fdverify. With --no-write, --size and --duration count the bytes the DMA\n"
+"delivered.\n"
 "\n"
 "Needs (buffers x buf-size) of free 2 MB hugepages (default 32 x 8 MB =\n"
 "256 MB = 128 pages; the reference image reserves 512 MB with the\n"
@@ -128,7 +151,7 @@ static void usage(FILE *f)
 "the recording; the file keeps what was written and its header is finalised.\n"
 "\n"
 "Exit code: 0 = complete with zero dropped beats, 2 = beats were dropped,\n"
-"1 = error (including a stall).\n",
+"1 = error (including a stall); the same with --no-write.\n",
 		DEF_BUFFERS, DEF_QD, DEF_TIMEOUT, DEF_DEVICE, FDREC_TARGET);
 }
 
@@ -142,6 +165,7 @@ static int parse_args(int argc, char **argv, struct opts *o)
 		{ "buf-size", required_argument, NULL, 'B' },
 		{ "qd", required_argument, NULL, 'Q' },
 		{ "no-tpg", no_argument, NULL, 'N' },
+		{ "no-write", no_argument, NULL, 'W' },
 		{ "stats", required_argument, NULL, 'S' },
 		{ "timeout", required_argument, NULL, 't' },
 		{ "device", required_argument, NULL, 'D' },
@@ -197,6 +221,9 @@ static int parse_args(int argc, char **argv, struct opts *o)
 		case 'N':
 			o->no_tpg = true;
 			break;
+		case 'W':
+			o->no_write = true;
+			break;
 		case 'S':
 			if (parse_double(optarg, &o->stats) || o->stats < 0)
 				return die_usage("invalid --stats '%s'", optarg);
@@ -222,9 +249,15 @@ static int parse_args(int argc, char **argv, struct opts *o)
 			return -1;
 		}
 	}
-	if (optind != argc - 1)
-		return die_usage("exactly one <output-file> is required");
-	o->output = argv[optind];
+	if (o->no_write) {
+		if (optind != argc)
+			return die_usage("--no-write creates no file: give no <output-file>");
+		o->output = "(no write)";
+	} else {
+		if (optind != argc - 1)
+			return die_usage("exactly one <output-file> is required");
+		o->output = argv[optind];
+	}
 	if (o->no_tpg && o->rate_set)
 		return die_usage("--rate programs the test pattern generator; it cannot be combined with --no-tpg");
 	if (o->qd > o->buffers)
@@ -362,6 +395,14 @@ static void take_filled(struct rec *r)
 				len = remain;   /* o.size is a 4 KB multiple */
 				r->done_filling = true;
 			}
+		}
+		if (r->o.no_write) {
+			/* no file I/O: the buffer goes straight back to the DMA */
+			r->bytes_submitted += len;
+			r->bytes_written += len;
+			r->bufs_written++;
+			release_buf(r, f.index);
+			continue;
 		}
 		buf = r->mem + (size_t)f.index * r->o.buf_size;
 		sqe = io_uring_get_sqe(&r->ring);
@@ -508,8 +549,8 @@ int main(int argc, char **argv)
 		return 1;
 	if (r->o.size % 4096) {
 		r->o.size = (r->o.size + 4095) & ~4095ull;
-		fprintf(stderr, "fdrec: --size rounded up to %" PRIu64 " bytes (O_DIRECT needs 4 KB multiples)\n",
-			r->o.size);
+		fprintf(stderr, "fdrec: --size rounded up to %" PRIu64 " bytes (a multiple of 4096%s)\n",
+			r->o.size, r->o.no_write ? "" : ": O_DIRECT");
 	}
 
 	r->dev = open(r->o.device, O_RDWR | O_CLOEXEC);
@@ -526,9 +567,19 @@ int main(int argc, char **argv)
 			r->info.api_version, FDREC_API_VERSION);
 		goto out;
 	}
+	/* bytes per fabric beat (driver >= 1.3 reads BEAT_BYTES; older drivers
+	 * report the fixed 16 of their 128-bit datapath) */
+	if (!r->info.beat_bytes)
+		r->info.beat_bytes = FDREC_BEAT_BYTES_DEFAULT;
+	if (r->o.buf_size % r->info.beat_bytes) {
+		err_msg("--buf-size %" PRIu64 " is not a multiple of the %u-byte fabric beat",
+			r->o.buf_size, r->info.beat_bytes);
+		goto out;
+	}
 
 	if (r->o.rate_set) {
 		struct fdrec_rate rt = { .rate_bps = r->o.rate };
+		double fifo_bytes = (double)r->info.fifo_depth * r->info.beat_bytes;
 
 		if (ioctl(r->dev, FDREC_IOC_SET_RATE, &rt) < 0) {
 			perr("FDREC_IOC_SET_RATE");
@@ -536,11 +587,10 @@ int main(int argc, char **argv)
 		}
 		r->o.rate = rt.rate_bps;
 		if (r->info.fifo_depth &&
-		    r->o.rate * RESTART_GAP_US / 1e6 > (double)r->info.fifo_depth * r->info.beat_bytes)
-			fprintf(stderr, "fdrec: warning: at %.1f MB/s the %u-beat ingest FIFO covers only %.1f us of the ~%.0f us DMA restart gap at each buffer boundary: expect drops\n",
-				r->o.rate / 1e6, r->info.fifo_depth,
-				(double)r->info.fifo_depth * r->info.beat_bytes / r->o.rate * 1e6,
-				RESTART_GAP_US);
+		    r->o.rate * FALLBACK_RESTART_US / 1e6 > fifo_bytes)
+			fprintf(stderr, "fdrec: warning: at %.1f MB/s the %u-beat (%.0f KB) ingest FIFO lasts %.1f us. That bridges the DMA's descriptor fetch at a buffer boundary, but not the ~%.0f us pause of a DMA restart from the interrupt handler, which xilinx_dma falls back to when it cannot append to the running descriptor chain (kernel without the meta-fdrec xilinx_dma patch): drops are likely if that happens\n",
+				r->o.rate / 1e6, r->info.fifo_depth, fifo_bytes / 1024,
+				fifo_bytes / r->o.rate * 1e6, FALLBACK_RESTART_US);
 		if (r->o.rate && (double)r->o.buf_size / r->o.rate > r->o.timeout / 2)
 			fprintf(stderr, "fdrec: warning: at %.3f MB/s one %" PRIu64 " MB buffer takes %.1f s to fill; raise --timeout (%.0f s) or lower --buf-size\n",
 				r->o.rate / 1e6, r->o.buf_size >> 20,
@@ -570,12 +620,14 @@ int main(int argc, char **argv)
 		goto out;
 	}
 
-	r->out = open(r->o.output, O_CREAT | O_WRONLY | O_TRUNC | O_DIRECT | O_CLOEXEC, 0644);
-	if (r->out < 0) {
-		perr("open %s with O_DIRECT", r->o.output);
-		goto out;
+	if (!r->o.no_write) {
+		r->out = open(r->o.output, O_CREAT | O_WRONLY | O_TRUNC | O_DIRECT | O_CLOEXEC, 0644);
+		if (r->out < 0) {
+			perr("open %s with O_DIRECT", r->o.output);
+			goto out;
+		}
 	}
-	if (r->o.size) {
+	if (r->o.size && !r->o.no_write) {
 		e = posix_fallocate(r->out, 0, HDR_SIZE + r->o.size);
 		if (e == ENOSPC) {
 			err_msg("%s: not enough free space for %" PRIu64 " bytes",
@@ -607,7 +659,8 @@ int main(int argc, char **argv)
 		goto out;
 	}
 	/* Fixed buffers spare the kernel a page-pin per write; optional */
-	r->fixed = io_uring_register_buffers(&r->ring, iov, r->o.buffers) == 0;
+	if (!r->o.no_write)
+		r->fixed = io_uring_register_buffers(&r->ring, iov, r->o.buffers) == 0;
 
 	memset(&sa, 0, sizeof(sa));
 	sa.sa_handler = on_signal;      /* no SA_RESTART: interrupt the wait */
@@ -623,16 +676,22 @@ int main(int argc, char **argv)
 	r->t0 = r->t_last = r->t_progress = now_s();
 	r->hdr->start_time_ns = htole64(start.start_time_ns);
 	r->hdr->first_seq = htole64(r->o.no_tpg ? 0 : start.first_seq);
-	if (write_header(r)) {
+	if (!r->o.no_write && write_header(r)) {
 		set_error(r, -EIO);
 		do_stop(r);
 	}
 
-	if (!r->o.quiet && isatty(2))
-		fprintf(stderr, "fdrec: recording to %s (%u x %" PRIu64 " MB buffers, qd %u%s%s) -- Ctrl-C to stop\n",
-			r->o.output, r->o.buffers, r->o.buf_size >> 20, r->o.qd,
-			r->fixed ? ", fixed buffers" : "",
-			r->o.no_tpg ? ", user source" : ", test pattern");
+	if (!r->o.quiet && isatty(2)) {
+		if (r->o.no_write)
+			fprintf(stderr, "fdrec: --no-write: DMA ring only, nothing is written (%u x %" PRIu64 " MB buffers, %u-byte beats%s) -- Ctrl-C to stop\n",
+				r->o.buffers, r->o.buf_size >> 20, r->info.beat_bytes,
+				r->o.no_tpg ? ", user source" : ", test pattern");
+		else
+			fprintf(stderr, "fdrec: recording to %s (%u x %" PRIu64 " MB buffers, qd %u%s, %u-byte beats%s) -- Ctrl-C to stop\n",
+				r->o.output, r->o.buffers, r->o.buf_size >> 20, r->o.qd,
+				r->fixed ? ", fixed buffers" : "", r->info.beat_bytes,
+				r->o.no_tpg ? ", user source" : ", test pattern");
+	}
 	if (r->o.duration > 0)
 		deadline = r->t0 + r->o.duration;
 	next_stats = r->t0 + (r->o.stats > 0 ? r->o.stats : 1e30);
@@ -672,7 +731,7 @@ int main(int argc, char **argv)
 				memset(&st, 0, sizeof(st));
 			if (isatty(2) && !r->o.quiet)
 				fputc('\n', stderr);
-			err_msg("recording stalled: no buffer completed for %.0f s (%s; writes in flight %u, FIFO high-water %u/%u, drops %" PRIu64 ")",
+			err_msg("recording stalled: no buffer completed for %.0f s (%s; writes in flight %u, FIFO high-water %u/%u beats, drops %" PRIu64 ")",
 				r->o.timeout,
 				r->inflight ? "SSD not completing writes?" :
 				r->o.no_tpg ? "source not producing data?" : "DMA not filling buffers?",
@@ -733,32 +792,36 @@ int main(int argc, char **argv)
 	r->hdr->data_bytes = htole64(r->bytes_written);
 	r->hdr->drop_count = htole64(r->last_drop);
 	r->hdr->flags = htole32(le32toh(r->hdr->flags) | FDREC_FILE_FLAG_COMPLETE);
-	if (write_header(r))
-		set_error(r, -EIO);
-	if (ftruncate(r->out, HDR_SIZE + r->bytes_written) < 0) {
-		perr("ftruncate %s", r->o.output);
-		set_error(r, -errno);
-	}
-	if (fsync(r->out) < 0) {
-		perr("fsync %s", r->o.output);
-		set_error(r, -errno);
+	if (!r->o.no_write) {
+		if (write_header(r))
+			set_error(r, -EIO);
+		if (ftruncate(r->out, HDR_SIZE + r->bytes_written) < 0) {
+			perr("ftruncate %s", r->o.output);
+			set_error(r, -errno);
+		}
+		if (fsync(r->out) < 0) {
+			perr("fsync %s", r->o.output);
+			set_error(r, -errno);
+		}
 	}
 
 	{
 		double el = (double)(le64toh(r->hdr->stop_time_ns) - start.start_time_ns) / 1e9;
 
+		/* with --no-write, "bytes" are the bytes the DMA delivered */
 		printf("fdrec: %s: %" PRIu64 " bytes (%" PRIu64 " buffers) in %.2f s, %.1f MB/s\n",
 		       r->o.output, r->bytes_written, r->bufs_written, el,
 		       el > 0 ? r->bytes_written / el / 1e6 : 0.0);
-		printf("fdrec: dropped beats %" PRIu64 " (at stop: %" PRIu64 "), FIFO high-water %u of %u beats, max writes in flight %u\n",
+		printf("fdrec: dropped beats %" PRIu64 " (at stop: %" PRIu64 "), FIFO high-water %u of %u beats (%u bytes each), max writes in flight %u\n",
 		       r->last_drop, (uint64_t)r->final.drop_count, r->final.fifo_hwm,
-		       r->final.fifo_depth, r->max_inflight);
+		       r->final.fifo_depth, r->info.beat_bytes, r->max_inflight);
 		/* One machine-readable line for scripts (fdbench.sh) */
 		printf("RESULT bytes=%" PRIu64 " seconds=%.3f rate_bps=%" PRIu64
-		       " drops=%" PRIu64 " fifo_hwm=%u fifo_depth=%u error=%d\n",
+		       " drops=%" PRIu64 " fifo_hwm=%u fifo_depth=%u error=%d"
+		       " beat_bytes=%u no_write=%d\n",
 		       r->bytes_written, el, r->o.rate_set ? r->o.rate : 0,
 		       r->last_drop, r->final.fifo_hwm, r->final.fifo_depth,
-		       r->error);
+		       r->error, r->info.beat_bytes, r->o.no_write ? 1 : 0);
 	}
 
 	if (r->error)
@@ -768,8 +831,10 @@ int main(int argc, char **argv)
 	else
 		ret = 0;
 	if (ret == 2)
-		fprintf(stderr, "fdrec: WARNING: %" PRIu64 " beats were dropped -- the recording is not valid\n",
-			r->last_drop);
+		fprintf(stderr, "fdrec: WARNING: %" PRIu64 " beats were dropped -- %s\n",
+			r->last_drop, r->o.no_write ?
+			"the fabric -> DDR path did not keep up with the source" :
+			"the recording is not valid");
 out:
 	if (r->ring.ring_fd > 0)
 		io_uring_queue_exit(&r->ring);

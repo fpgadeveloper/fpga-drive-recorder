@@ -10,7 +10,7 @@ the samples into DDR buffers, and the NVMe controller reads those same buffers d
 (`O_DIRECT` writes) when the file is written. The CPU never copies the sample data; it only does
 the bookkeeping. The data source in the design is a test pattern generator that models an ADC
 and that you can replace with your own logic. Every recording reports the number of beats
-dropped (zero for a valid recording), and the `fdverify` tool checks a recorded file beat by beat.
+dropped (zero for a valid recording), and the `fdverify` tool checks every word of a recorded file.
 Recordings can also be played back into the fabric, where a hardware checker (or your own
 data sink, such as a DAC) consumes them at a set rate.
 
@@ -36,7 +36,7 @@ Important links:
 
 ![Block diagram](docs/source/images/fdrec-block-zynqmp.png)
 
-* 128-bit AXI-Stream datapath at 250 MHz; the AMD AXI DMA (scatter-gather, S2MM for recording,
+* 256-bit AXI-Stream datapath at 250 MHz (8 GB/s); the AMD AXI DMA (scatter-gather, S2MM for recording,
   MM2S for playback) moves the data between the fabric and a ring of 2 MB-hugepage buffers in
   PS DDR, allocated by the recorder app and pinned by the `fdrec` kernel driver. The NVMe SSDs
   read and write the same buffers (`O_DIRECT`).
@@ -183,7 +183,7 @@ sudo fdsetup-raid0.sh --single /dev/nvme0n1
 #    for --timeout seconds, default 10)
 sudo fdrec --rate 1000MB --size 10G /mnt/rec/test.dat
 
-# 3. Verify every beat of the recording
+# 3. Verify every word of the recording
 sudo fdverify /mnt/rec/test.dat
 
 # 4. Play it back into the fabric: the hardware checker consumes it at 1 GB/s and checks

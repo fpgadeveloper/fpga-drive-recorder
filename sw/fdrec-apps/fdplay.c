@@ -18,8 +18,14 @@
  * are verified in hardware: pattern errors, sequence gaps and underflows
  * (sink ready, no data -- the SSD could not keep up with the sink rate).
  *
+ * Units: the checker counts fabric beats of the design (fdrec_info.beat_bytes,
+ * 32 on a 256-bit datapath); its sequence numbers and the file's pattern are
+ * 16-byte words. A recording made with another beat size (a 128-bit-era file
+ * on a 256-bit design) plays as the same byte stream; GAP_BEATS is compared
+ * with the recording's drop_count in words (beats x beat_bytes / 16).
+ *
  * Exit codes: 0 = complete; with the checker also ERRORS = 0, UNDERFLOWS = 0
- *                 and GAP_BEATS = the recording's drop_count,
+ *                 and GAP_BEATS = the recording's drop_count (in words),
  *             2 = complete, but the checker found a problem,
  *             1 = error (incl. an incomplete playback).
  */
@@ -44,6 +50,7 @@
 #include <endian.h>
 #include <liburing.h>
 
+#include "fdrec_regs.h"
 #include "fdrec_uapi.h"
 #include "fdrec_file.h"
 #include "fdrec_common.h"
@@ -58,11 +65,16 @@
 #define DEF_QD          8
 #define DEF_TIMEOUT     10.0            /* s without DMA progress = stalled */
 #define HDR_SIZE        FDREC_FILE_HEADER_SIZE
-/* DMA restart gap at every buffer boundary (xilinx_dma idles at the tail of
- * the current descriptor until its IRQ handler starts the next one): ~15 us
- * worst case measured on uzev. The egress FIFO must cover it at the sink rate. */
-#define RESTART_GAP_US  15.0
-#define BEAT_BYTES      16              /* bytes per 128-bit beat */
+/*
+ * FIFO budget at a buffer boundary (see fdrec.c): with the meta-fdrec
+ * xilinx_dma patch the MM2S runs from one buffer into the next by itself and
+ * the egress FIFO only bridges the descriptor fetch and short DDR latency.
+ * If xilinx_dma falls back to restarting the DMA from its interrupt handler
+ * (kernel without the patch, descriptor ring out of order), the pause is
+ * ~9 us with a 15-20 us tail on a Zynq UltraScale+ target.
+ */
+#define FALLBACK_RESTART_US  15.0
+#define WORD_BYTES      FDREC_WORD_BYTES        /* one 16-byte pattern word */
 
 /* io_uring user_data: the poll request on the device, else a chunk number */
 #define UD_POLL         ((uint64_t)-1)
@@ -226,7 +238,8 @@ struct play {
 	int in;
 	struct fdrec_info info;
 	struct fdrec_file_header *hdr;
-	uint64_t data_bytes;    /* bytes to play (multiple of 16) */
+	uint32_t file_beat;     /* the recording's beat_bytes (header) */
+	uint64_t data_bytes;    /* bytes to play (whole fabric beats) */
 	uint64_t nchunks;
 	uint8_t *mem;
 	size_t mem_len;
@@ -291,11 +304,12 @@ static int read_header(struct play *p)
 		err_msg("%s: not an fdrec recording (bad magic)", p->o.input);
 		return -1;
 	}
+	p->file_beat = le32toh(p->hdr->beat_bytes);
+	/* 16 (128-bit) or 32 (256-bit): a whole number of pattern words */
 	if (le32toh(p->hdr->header_size) != HDR_SIZE ||
-	    le32toh(p->hdr->beat_bytes) != BEAT_BYTES) {
+	    !p->file_beat || p->file_beat % WORD_BYTES || p->file_beat > 4096) {
 		err_msg("%s: unsupported header (header_size %u, beat_bytes %u)",
-			p->o.input, le32toh(p->hdr->header_size),
-			le32toh(p->hdr->beat_bytes));
+			p->o.input, le32toh(p->hdr->header_size), p->file_beat);
 		return -1;
 	}
 	if (fstat(p->in, &sb) < 0) {
@@ -315,15 +329,6 @@ static int read_header(struct play *p)
 		p->data_bytes = avail;
 		fprintf(stderr, "fdplay: note: %s is an incomplete recording (no COMPLETE flag); playing all %" PRIu64
 			" bytes after the header, drop_count unknown\n", p->o.input, avail);
-	}
-	if (p->data_bytes % BEAT_BYTES) {
-		fprintf(stderr, "fdplay: note: ignoring %" PRIu64 " trailing bytes (not a whole beat)\n",
-			p->data_bytes % BEAT_BYTES);
-		p->data_bytes -= p->data_bytes % BEAT_BYTES;
-	}
-	if (!p->data_bytes) {
-		err_msg("%s: no data to play", p->o.input);
-		return -1;
 	}
 	if (!p->o.no_check && !(flags & FDREC_FILE_FLAG_TPG)) {
 		err_msg("%s was not recorded from the test pattern generator: the checker would flag every beat; use --no-check",
@@ -575,7 +580,7 @@ static void print_stats(struct play *p, bool final)
  */
 static void wait_sink_drained(struct play *p)
 {
-	uint64_t want = p->data_bytes / BEAT_BYTES;
+	uint64_t want = p->data_bytes / p->info.beat_bytes;
 	double deadline = now_s() + p->o.timeout;
 	struct fdrec_play_stats st;
 
@@ -604,6 +609,7 @@ int main(int argc, char **argv)
 	double next_stats;
 	uint64_t want_beats, hdr_drops = 0, first_seq;
 	bool complete, check_ok = true, hdr_complete;
+	unsigned wpb;           /* pattern words per fabric beat of the design */
 	int ret = 1, e;
 	unsigned i;
 
@@ -622,8 +628,6 @@ int main(int argc, char **argv)
 	hdr_complete = le32toh(p->hdr->flags) & FDREC_FILE_FLAG_COMPLETE;
 	hdr_drops = le64toh(p->hdr->drop_count);
 	first_seq = le64toh(p->hdr->first_seq);
-	p->nchunks = (p->data_bytes + p->o.buf_size - 1) / p->o.buf_size;
-	p->prefill = p->nchunks < p->o.buffers ? p->nchunks : p->o.buffers;
 
 	p->dev = open(p->o.device, O_RDWR | O_CLOEXEC);
 	if (p->dev < 0) {
@@ -639,6 +643,39 @@ int main(int argc, char **argv)
 			p->info.api_version, FDREC_API_VERSION);
 		goto out;
 	}
+	/* bytes per fabric beat (driver >= 1.3 reads BEAT_BYTES; older drivers
+	 * report the fixed 16 of their 128-bit datapath) */
+	if (!p->info.beat_bytes)
+		p->info.beat_bytes = FDREC_BEAT_BYTES_DEFAULT;
+	if (p->info.beat_bytes % WORD_BYTES) {
+		err_msg("%s: unsupported beat size %u bytes", p->o.device, p->info.beat_bytes);
+		goto out;
+	}
+	wpb = p->info.beat_bytes / WORD_BYTES;
+	if (p->o.buf_size % p->info.beat_bytes) {
+		err_msg("--buf-size %" PRIu64 " is not a multiple of the %u-byte fabric beat",
+			p->o.buf_size, p->info.beat_bytes);
+		goto out;
+	}
+	/* The MM2S plays whole fabric beats only (the egress path ignores
+	 * TKEEP): a 128-bit-era recording with an odd number of words loses its
+	 * last word on a 256-bit design. */
+	if (p->data_bytes % p->info.beat_bytes) {
+		fprintf(stderr, "fdplay: note: ignoring %" PRIu64 " trailing bytes (not a whole %u-byte beat)\n",
+			p->data_bytes % p->info.beat_bytes, p->info.beat_bytes);
+		p->data_bytes -= p->data_bytes % p->info.beat_bytes;
+	}
+	if (!p->data_bytes) {
+		err_msg("%s: no data to play", p->o.input);
+		goto out;
+	}
+	if (!p->o.no_check && p->file_beat < p->info.beat_bytes && hdr_drops)
+		fprintf(stderr, "fdplay: note: %s was recorded with %u-byte beats and has %" PRIu64
+			" dropped beats; on this %u-byte datapath a gap that is not a whole beat is truncated in GAP_BEATS or counted as a bad beat\n",
+			p->o.input, p->file_beat, hdr_drops, p->info.beat_bytes);
+	p->nchunks = (p->data_bytes + p->o.buf_size - 1) / p->o.buf_size;
+	p->prefill = p->nchunks < p->o.buffers ? p->nchunks : p->o.buffers;
+
 	if (!(p->info.caps & FDREC_CAP_MM2S)) {
 		err_msg("%s has no playback channel (needs a design with the AXI DMA MM2S, fdrec_core 1.1, and dma-names \"tx\" in the device tree)",
 			p->o.device);
@@ -659,12 +696,15 @@ int main(int argc, char **argv)
 		}
 		p->o.rate = rt.rate_bps;
 	}
-	/* Underflow budget: FIFO bytes / sink rate must exceed the restart gap */
+	/* Underflow budget: FIFO bytes / sink rate against the fallback pause */
 	if (!p->o.no_check && get_stats(p, &st) == 0 && st.egr_depth &&
-	    st.chk.rate_bps * RESTART_GAP_US / 1e6 > (double)st.egr_depth * BEAT_BYTES)
-		fprintf(stderr, "fdplay: warning: at %.1f MB/s the %u-beat egress FIFO covers only %.1f us of the ~%.0f us DMA restart gap at each buffer boundary: expect underflows (lower --rate, or a deeper EGR FIFO in the design)\n",
+	    st.chk.rate_bps * FALLBACK_RESTART_US / 1e6 >
+	    (double)st.egr_depth * p->info.beat_bytes)
+		fprintf(stderr, "fdplay: warning: at %.1f MB/s the %u-beat (%.0f KB) egress FIFO lasts %.1f us. That bridges the DMA's descriptor fetch at a buffer boundary, but not the ~%.0f us pause of a DMA restart from the interrupt handler, which xilinx_dma falls back to when it cannot append to the running descriptor chain (kernel without the meta-fdrec xilinx_dma patch): underflows are likely if that happens\n",
 			st.chk.rate_bps / 1e6, st.egr_depth,
-			(double)st.egr_depth * BEAT_BYTES / st.chk.rate_bps * 1e6, RESTART_GAP_US);
+			(double)st.egr_depth * p->info.beat_bytes / 1024,
+			(double)st.egr_depth * p->info.beat_bytes / st.chk.rate_bps * 1e6,
+			FALLBACK_RESTART_US);
 	if (p->o.no_check && (p->info.caps & FDREC_CAP_CHECK) &&
 	    get_stats(p, &st) == 0 && !st.chk.enabled)
 		fprintf(stderr, "fdplay: note: the checker is disabled; if it is still the data sink in this design, the stream will stall (enable it: echo 1 > /sys/class/misc/fdrec0/chk_enable)\n");
@@ -807,7 +847,7 @@ int main(int argc, char **argv)
 	if (!p->o.quiet && p->o.stats > 0)
 		print_stats(p, true);
 
-	want_beats = p->data_bytes / BEAT_BYTES;
+	want_beats = p->data_bytes / p->info.beat_bytes;
 	{
 		double el = now_s() - p->t0;
 		const struct fdrec_chk_stats *c = &p->final.chk;
@@ -817,16 +857,27 @@ int main(int argc, char **argv)
 		       el > 0 ? p->bytes_done / el / 1e6 : 0.0,
 		       complete ? "" : " -- INCOMPLETE");
 		if (!p->o.no_check) {
-			/* first sequence number the sink saw (valid without
-			 * pattern errors): last + 1 = first + beats + gap_beats */
-			uint64_t first_seen = c->last_seq + 1 - c->beats - c->gap_beats;
+			/* Sequence numbers are in 16-byte words, the counters
+			 * in beats of wpb words; LAST_SEQ is the seq of word 0
+			 * of the last good beat. First word the sink saw (valid
+			 * without pattern errors):
+			 *   last + wpb = first + (beats + gap_beats) x wpb */
+			uint64_t first_seen = c->last_seq + wpb -
+					      (c->beats + c->gap_beats) * wpb;
 			bool first_ok = !c->beats || c->errors || first_seen == first_seq;
+			/* missing words: the checker's gap beats vs the
+			 * recording's dropped beats, each in its own beat size */
+			uint64_t gap_words = c->gap_beats * wpb;
+			uint64_t drop_words = hdr_drops * (p->file_beat / WORD_BYTES);
 
-			printf("fdplay: checker: beats %" PRIu64 " (expected %" PRIu64 "), errors %" PRIu64
+			printf("fdplay: checker: beats %" PRIu64 " (expected %" PRIu64 ", %u bytes each), errors %" PRIu64
 			       ", gaps %" PRIu64 ", gap beats %" PRIu64 " (recording drop_count %" PRIu64
 			       "%s), underflows %" PRIu64 ", last seq %" PRIu64 ", sink rate %.1f MB/s\n",
-			       (uint64_t)c->beats, want_beats, (uint64_t)c->errors, (uint64_t)c->gaps,
-			       (uint64_t)c->gap_beats, hdr_drops, hdr_complete ? "" : ", unknown",
+			       (uint64_t)c->beats, want_beats, p->info.beat_bytes,
+			       (uint64_t)c->errors, (uint64_t)c->gaps,
+			       (uint64_t)c->gap_beats, hdr_drops,
+			       !hdr_complete ? ", unknown" :
+			       p->file_beat != p->info.beat_bytes ? " of a different beat size" : "",
 			       (uint64_t)c->underflows, (uint64_t)c->last_seq, c->rate_bps / 1e6);
 			if (c->errors) {
 				printf("PROBLEM: %" PRIu64 " beats failed the pattern check\n", (uint64_t)c->errors);
@@ -837,9 +888,10 @@ int main(int argc, char **argv)
 				       (uint64_t)c->underflows);
 				check_ok = false;
 			}
-			if (hdr_complete && c->gap_beats != hdr_drops) {
-				printf("PROBLEM: gap beats %" PRIu64 " != the recording's drop_count %" PRIu64 "\n",
-				       (uint64_t)c->gap_beats, hdr_drops);
+			if (hdr_complete && gap_words != drop_words) {
+				printf("PROBLEM: gap beats %" PRIu64 " (%" PRIu64 " words) != the recording's drop_count %" PRIu64
+				       " (%" PRIu64 " words)\n",
+				       (uint64_t)c->gap_beats, gap_words, hdr_drops, drop_words);
 				check_ok = false;
 			}
 			if (!first_ok) {
@@ -857,11 +909,12 @@ int main(int argc, char **argv)
 		printf("RESULT bytes=%" PRIu64 " seconds=%.3f sink_rate_bps=%" PRIu64
 		       " beats=%" PRIu64 " errors=%" PRIu64 " gaps=%" PRIu64 " gap_beats=%" PRIu64
 		       " drop_count=%" PRIu64 " underflows=%" PRIu64 " egr_discard=%" PRIu64
-		       " max_reads=%u complete=%d error=%d\n",
+		       " max_reads=%u complete=%d error=%d beat_bytes=%u file_beat_bytes=%u\n",
 		       p->bytes_done, el, (uint64_t)c->rate_bps, (uint64_t)c->beats,
 		       (uint64_t)c->errors, (uint64_t)c->gaps, (uint64_t)c->gap_beats, hdr_drops,
 		       (uint64_t)c->underflows, (uint64_t)p->final.egr_discard,
-		       p->max_reads_inflight, complete, p->error);
+		       p->max_reads_inflight, complete, p->error, p->info.beat_bytes,
+		       p->file_beat);
 	}
 
 	if (!complete || p->error)

@@ -8,14 +8,19 @@
 # verifies every recording with fdverify, and prints rate vs. pass/fail vs.
 # drop count vs. FIFO high-water mark. The highest passing rate is the
 # sustained recording rate of this board + SSD (+ filesystem) combination.
+#
+# Default sweep: 500 MB/s steps from 500 MB/s up to the generator maximum,
+# src_clk x beat_bytes from sysfs (8000 MB/s on the 256-bit / 250 MHz
+# reference designs: 16 steps; a driver without the beat_bytes attribute has
+# the 16-byte beats of a 128-bit datapath).
 
 set -u
 
 DIR=/mnt/rec
 SIZE=32G
-FROM=250
+FROM=500
 TO=""
-STEP=250
+STEP=500
 FDREC_ARGS=""
 KEEP=0
 STOP_ON_FAIL=0
@@ -32,7 +37,8 @@ Options:
   --dir <dir>          directory on the SSD filesystem (default $DIR)
   --size <bytes>       data per step, fdrec suffixes (default $SIZE)
   --from <MB/s>        first rate in MB/s (10^6 bytes/s, default $FROM)
-  --to <MB/s>          last rate (default: generator maximum = src_clk x 16)
+  --to <MB/s>          last rate (default: generator maximum = src_clk x
+                       beat_bytes, e.g. 250 MHz x 32 B = 8000)
   --step <MB/s>        rate step (default $STEP)
   --stop-on-fail       stop at the first failing rate
   --keep               keep the recordings (default: delete after verifying)
@@ -67,10 +73,14 @@ command -v fdverify >/dev/null || die "fdverify not found in PATH"
 [ -d "$DIR" ] || die "$DIR does not exist (run fdsetup-raid0.sh)"
 
 SYS=/sys/class/misc/fdrec0
+# bytes per fabric beat (driver >= 1.3); 16 = 128-bit datapath of older drivers
+BEAT=$(cat $SYS/beat_bytes 2>/dev/null || echo 16)
 if [ -z "$TO" ]; then
     clk=$(cat $SYS/src_clk_hz 2>/dev/null || echo 0)
     [ "$clk" -gt 0 ] || die "cannot read $SYS/src_clk_hz; give --to"
-    TO=$(( clk * 16 / 1000000 ))
+    # rounded to the nearest MB/s: a PS clock of 249.997 MHz still gives 8000
+    # (the driver clamps the top step to the generator maximum)
+    TO=$(( (clk * BEAT + 500000) / 1000000 ))
 fi
 
 FS_DEV=$(df -P "$DIR" | awk 'NR==2 {print $1}')
@@ -79,7 +89,7 @@ OUT="$DIR/fdbench.dat"
 LOG=$(mktemp /tmp/fdbench.XXXXXX)
 trap 'rm -f "$LOG"' EXIT
 
-echo "fdbench: $FS_DEV ($FS_TYPE) at $DIR, $SIZE per step, $FROM..$TO MB/s step $STEP"
+echo "fdbench: $FS_DEV ($FS_TYPE) at $DIR, $SIZE per step, $FROM..$TO MB/s step $STEP ($BEAT-byte beats)"
 for d in /sys/block/nvme*n1; do
     [ -e "$d" ] && echo "  $(basename "$d"): $(cat "$d/device/model" 2>/dev/null | tr -s ' ') ($(cat "$d/device/firmware_rev" 2>/dev/null | tr -d ' '))"
 done

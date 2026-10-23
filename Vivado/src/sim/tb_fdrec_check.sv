@@ -5,35 +5,47 @@
 // tb_fdrec_check -- self-checking testbench for the playback path
 //
 // AXI DMA MM2S model (dp_clk 250 MHz) -> fdrec_core egress FIFO -> fdrec_check
-// (src_clk 200 MHz), wired as in the block design, registers driven through an
-// AXI4-Lite BFM. The DMA model emits the TPG pattern (TDATA[63:0] = seq,
-// TDATA[127:64] = ~seq) with TLAST every TLAST_EVERY beats and can inject bit
-// errors, backwards sequence numbers, gaps and starvation.
+// (src_clk 250 MHz, independent phase), wired as in the block design,
+// registers driven through an AXI4-Lite BFM. The DMA model emits the TPG
+// pattern (WPB = DATA_WIDTH/128 words per beat, word k = {~(seq+k), seq+k},
+// seq advancing by WPB per beat) with TLAST every TLAST_EVERY beats and can
+// inject bit errors, backwards sequence numbers, gaps (in beats) and
+// starvation. Runs for DATA_WIDTH 128 and 256 (see the sim_runs line below).
 //
 // Checks:
-//   1. Register block 1.1: VERSION, reset values, RW, unmapped offsets
+//   1. Register block 1.2: VERSION, BEAT_BYTES, reset values, RW, unmapped
+//      offsets
 //   2. Clean stream: all checker counters zero, BEATS / LAST_SEQ / EGR_BEATS_IN
 //      exact, every beat reaches the sink in order (no loss), TLAST carried
-//   3. Bit errors + backwards sequence numbers: ERRORS exact, no gaps
+//   3. Bit errors + backwards sequence numbers: ERRORS exact (one per bad beat,
+//      also when several words of a beat are bad), no gaps; with 256 bits also
+//      a bad second word and a second word with the wrong seq
 //   4. Gaps (incl. one before the first beat): GAPS and GAP_BEATS exact
 //   5. Throttle rate accuracy (< 1 %) at 5 rates incl. clamping; no underflow
 //      while the source keeps up; trailing idle after the stream not counted
 //   6. Starving source: UNDERFLOWS exact against an interface-level reference
 //   7. Slow sink: backpressure through the egress FIFO, no loss, counters
 //      consistent, FIFO fills to its depth
-//   7b. Full-rate sink across an upstream DMA stall of 4000 beat times: no
-//      underflow (the FIFO bridges it); a 4600-beat stall underflows exactly
+//   7b. Sink at 0.8 beat/clk across an upstream DMA stall of 4000 beat times:
+//      no underflow (the FIFO bridges it); a 4600-beat stall underflows
+//      exactly
 //   8. CHK_CTRL.RESET (busy bit, counters cleared); EGR_CTRL.FLUSH drains a
 //      stalled DMA (DISCARD exact); SOFT_RST resets checker + egress FIFO while
 //      the DMA streams into a disabled sink, then a clean run works again
 //
 // Prints PASS / FAIL and calls $finish (sim.tcl contract).
+//
+// sim_runs: DATA_WIDTH=128 DATA_WIDTH=256
 
 `timescale 1ns / 1ps
 
-module tb_fdrec_check;
+module tb_fdrec_check #(
+  parameter integer DATA_WIDTH = 256
+);
 
-  localparam integer SRC_HZ = 200000000;
+  localparam integer WPB    = DATA_WIDTH / 128;   // pattern words per beat
+  localparam integer KW     = DATA_WIDTH / 8;     // TKEEP width = beat bytes
+  localparam integer SRC_HZ = 250000000;
   localparam integer DP_HZ  = 250000000;
   localparam integer DEPTH  = 256;    // ingest FIFO (unused here)
   localparam integer EDEPTH = 4096;   // egress FIFO (as on uzev)
@@ -47,24 +59,24 @@ module tb_fdrec_check;
                     CHK_UNDERFLOWS_LO = 12'h090, CHK_LAST_SEQ_LO = 12'h098,
                     EGR_CTRL = 12'h0A0, EGR_FIFO_DEPTH = 12'h0A4,
                     EGR_BEATS_IN_LO = 12'h0A8, EGR_DISCARD_LO = 12'h0B0,
-                    EGR_FIFO_LEVEL = 12'h0B8;
+                    EGR_FIFO_LEVEL = 12'h0B8, BEAT_BYTES = 12'h0BC;
 
   // ---------------------------------------------------------------------------
   // Clocks / resets
   // ---------------------------------------------------------------------------
   reg src_clk = 1'b0, dp_clk = 1'b0;
   reg src_resetn = 1'b0, dp_resetn = 1'b0;
-  always #2.5 src_clk = ~src_clk;                       // 200 MHz
+  always #2.0 src_clk = ~src_clk;                       // 250 MHz
   initial begin #1.3; forever #2.0 dp_clk = ~dp_clk; end // 250 MHz, offset phase
 
   // ---------------------------------------------------------------------------
   // DUT: fdrec_core + fdrec_check
   // ---------------------------------------------------------------------------
-  reg  [127:0] mm2s_tdata = 0;
+  reg  [DATA_WIDTH-1:0] mm2s_tdata = 0;
   reg          mm2s_tvalid = 0, mm2s_tlast = 0;
   wire         mm2s_tready;
 
-  wire [127:0] snk_tdata;
+  wire [DATA_WIDTH-1:0] snk_tdata;
   wire         snk_tlast, snk_tvalid, snk_tready;
 
   wire         chk_enable, chk_reset;
@@ -80,6 +92,7 @@ module tb_fdrec_check;
   wire [31:0]  rdata;
 
   fdrec_core #(
+    .DATA_WIDTH     (DATA_WIDTH),
     .SRC_CLK_HZ     (SRC_HZ),
     .DP_CLK_HZ      (DP_HZ),
     .FIFO_DEPTH     (DEPTH),
@@ -89,7 +102,7 @@ module tb_fdrec_check;
     .src_resetn    (src_resetn),
     .dp_clk        (dp_clk),
     .dp_resetn     (dp_resetn),
-    .s_axis_tdata  (128'd0),
+    .s_axis_tdata  ({DATA_WIDTH{1'b0}}),
     .s_axis_tvalid (1'b0),
     .s_axis_tready (),
     .m_axis_tdata  (),
@@ -98,7 +111,7 @@ module tb_fdrec_check;
     .m_axis_tvalid (),
     .m_axis_tready (1'b1),
     .s_axis_mm2s_tdata  (mm2s_tdata),
-    .s_axis_mm2s_tkeep  (16'hFFFF),
+    .s_axis_mm2s_tkeep  ({KW{1'b1}}),
     .s_axis_mm2s_tlast  (mm2s_tlast),
     .s_axis_mm2s_tvalid (mm2s_tvalid),
     .s_axis_mm2s_tready (mm2s_tready),
@@ -140,7 +153,9 @@ module tb_fdrec_check;
     .chk_last_seq   (chk_last_seq)
   );
 
-  fdrec_check chk (
+  fdrec_check #(
+    .DATA_WIDTH     (DATA_WIDTH)
+  ) chk (
     .snk_clk        (src_clk),
     .snk_resetn     (src_resetn),
     .chk_enable     (chk_enable),
@@ -218,24 +233,30 @@ module tb_fdrec_check;
   // AXI DMA MM2S model (dp_clk)
   //   dma_total : beats to send (the model sends until dma_sent == dma_total)
   //   dma_pct   : probability (%) that a beat is offered in a cycle
-  //   gap_at[i] : skip that many sequence numbers before beat i
-  //   uerr_at / lerr_at : flip a bit in the upper / lower half of beat i
+  //   gap_at[i] : skip that many BEATS (x WPB sequence numbers) before beat i
+  //   uerr_at / lerr_at : flip a bit in the upper / lower half of word 0 of beat i
+  //   w1err_at  : flip a bit in the lower half of word 1 (WPB > 1 only)
+  //   w1seq_at  : word 1 carries seq + 2 instead of seq + 1, with a consistent
+  //               upper half (pattern-good word, wrong sequence; WPB > 1 only)
   //   rep_at[i] : beat i repeats the previous sequence number (goes backwards)
+  //   dma_seq counts beats; the seq of word k of a beat is dma_seq * WPB + k.
   // ---------------------------------------------------------------------------
   longint dma_total = 0, dma_sent = 0, dma_seq = 0;
   integer dma_pct = 100;
   longint gap_at[longint];
   bit     uerr_at[longint], lerr_at[longint], rep_at[longint];
+  bit     w1err_at[longint], w1seq_at[longint];
 
   // reference queue of beats that must reach the sink (not flushed/discarded)
-  reg [128:0] ref_q[$];
+  reg [DATA_WIDTH:0] ref_q[$];
   bit         tb_flush = 1'b0;
   longint     stall_cycles = 0;   // tvalid & !tready on the MM2S stream
 
   always @(posedge dp_clk) begin : dma
     bit fire;
     longint s;
-    reg [127:0] d;
+    reg [63:0] w;
+    reg [DATA_WIDTH-1:0] d;
     fire = mm2s_tvalid && mm2s_tready;
     if (mm2s_tvalid && !mm2s_tready) stall_cycles = stall_cycles + 1;
     if (fire) begin
@@ -247,9 +268,17 @@ module tb_fdrec_check;
         if (gap_at.exists(dma_sent)) dma_seq = dma_seq + gap_at[dma_sent];
         if (rep_at.exists(dma_sent)) s = dma_seq - 1;
         else begin s = dma_seq; dma_seq = dma_seq + 1; end
-        d = {~s, s};
+        for (int k = 0; k < WPB; k++) begin
+          w = s * WPB + k;
+          d[128*k +: 128] = {~w, w};
+        end
         if (uerr_at.exists(dma_sent)) d[100] = ~d[100];
         if (lerr_at.exists(dma_sent)) d[5]   = ~d[5];
+        if (WPB > 1 && w1err_at.exists(dma_sent)) d[128 + 5] = ~d[128 + 5];
+        if (WPB > 1 && w1seq_at.exists(dma_sent)) begin
+          w = s * WPB + 2;
+          d[128 +: 128] = {~w, w};
+        end
         mm2s_tdata  <= d;
         mm2s_tlast  <= (((dma_sent + 1) % TLAST_EVERY) == 0);
         mm2s_tvalid <= 1'b1;
@@ -262,6 +291,7 @@ module tb_fdrec_check;
   task automatic dma_reset_model();
     begin
       gap_at.delete(); uerr_at.delete(); lerr_at.delete(); rep_at.delete();
+      w1err_at.delete(); w1seq_at.delete();
       @(posedge dp_clk);
       dma_total = 0; dma_sent = 0; dma_seq = 0; dma_pct = 100;
       stall_cycles = 0;
@@ -280,7 +310,7 @@ module tb_fdrec_check;
   bit     win_on = 1'b0;
 
   always @(posedge src_clk) begin : snk_mon
-    reg [128:0] e;
+    reg [DATA_WIDTH:0] e;
     if (chk_reset) begin
       snk_started = 1'b0; ref_uf_pend = 0;
     end else if (snk_tready && snk_tvalid) begin
@@ -294,7 +324,7 @@ module tb_fdrec_check;
           e = ref_q.pop_front();
           if ({snk_tlast, snk_tdata} !== e)
             fail($sformatf("sink beat %0d: got %b/%h expected %b/%h", snk_beats,
-                           snk_tlast, snk_tdata, e[128], e[127:0]));
+                           snk_tlast, snk_tdata, e[DATA_WIDTH], e[DATA_WIDTH-1:0]));
         end
       end
     end else if (snk_tready && !snk_tvalid && snk_started) begin
@@ -408,8 +438,9 @@ module tb_fdrec_check;
     wait_dp(400);
 
     // ---------------- 1. Register block ----------------
-    $display("--- 1. register block 1.1");
-    axi_read(VERSION, v);         check("VERSION", v, 32'h0001_0001);
+    $display("--- 1. register block 1.2 (DATA_WIDTH %0d)", DATA_WIDTH);
+    axi_read(VERSION, v);         check("VERSION", v, 32'h0001_0002);
+    axi_read(BEAT_BYTES, v);      check("BEAT_BYTES", v, DATA_WIDTH / 8);
     axi_read(CHK_RATE_INC, v);    check("CHK_RATE_INC reset value", v, 32'h8000_0000);
     axi_read(CHK_CTRL, v);        check("CHK_CTRL reset value", v, 0);
     axi_read(EGR_CTRL, v);        check("EGR_CTRL reset value", v, 0);
@@ -417,7 +448,9 @@ module tb_fdrec_check;
     axi_read(EGR_FIFO_LEVEL, v);  check("EGR_FIFO_LEVEL idle", v, 0);
     axi_read(12'h068, v);         check("unmapped 0x068", v, 0);
     axi_read(12'h06C, v);         check("unmapped 0x06C", v, 0);
-    axi_read(12'h0BC, v);         check("unmapped 0x0BC", v, 0);
+    axi_read(12'h0C0, v);         check("unmapped 0x0C0", v, 0);
+    axi_write(BEAT_BYTES, 32'h0000_0010);
+    axi_read(BEAT_BYTES, v);      check("BEAT_BYTES is RO", v, DATA_WIDTH / 8);
     axi_write(CHK_RATE_INC, 32'h1234_5678);
     axi_read(CHK_RATE_INC, v);    check("CHK_RATE_INC rw", v, 32'h1234_5678);
     axi_write(CHK_RATE_INC, 32'hAB00_0000, 4'b1000);
@@ -444,7 +477,7 @@ module tb_fdrec_check;
     $display("--- 2. clean stream: 20000 beats, sink rate 1.0");
     start_play(20000, 32'h8000_0000);
     wait_done();
-    check_chk("clean", 20000, 0, 0, 0, 0, 19999);
+    check_chk("clean", 20000, 0, 0, 0, 0, 19999 * WPB);
     read64(EGR_BEATS_IN_LO, q);   check("clean EGR_BEATS_IN", q, 20000);
     read64(EGR_DISCARD_LO, q);    check("clean EGR_DISCARD", q, 0);
     // trailing idle after the stream: still no underflows
@@ -453,16 +486,21 @@ module tb_fdrec_check;
     check("clean ref underflows", ref_uf, 0);
 
     // ---------------- 3. Bit errors + backwards sequence ----------------
-    $display("--- 3. injected errors: 5 upper-half, 3 lower-half bit flips, 2 backwards beats");
+    $display("--- 3. injected errors: 5 upper-half, 4 lower-half bit flips (one in a beat with an upper-half flip), 2 backwards beats%s",
+             WPB > 1 ? ", 2 bad second words, 2 second words with a wrong seq (one in a bad beat)" : "");
     dma_reset_model();
     uerr_at[10] = 1; uerr_at[500] = 1; uerr_at[501] = 1; uerr_at[3000] = 1; uerr_at[7999] = 1;
-    lerr_at[100] = 1; lerr_at[2000] = 1; lerr_at[6000] = 1;
+    lerr_at[100] = 1; lerr_at[501] = 1; lerr_at[2000] = 1; lerr_at[6000] = 1;
     rep_at[1234] = 1; rep_at[5000] = 1;
+    // second-word errors (WPB > 1): 2 bad words, 2 wrong seqs; beat 3000
+    // already has an upper-half error in word 0, so it still counts once
+    w1err_at[2500] = 1; w1err_at[7000] = 1;
+    w1seq_at[4500] = 1; w1seq_at[3000] = 1;
     start_play(8000, 32'h8000_0000);
     wait_done();
-    // 8000 beats carry seq 0..7997 (two repeats); the last beat (7999) has an
-    // upper-half error, so LAST_SEQ is the seq of beat 7998 = 7996
-    check_chk("errors", 8000, 10, 0, 0, 0, 7996);
+    // 8000 beats carry beat seq 0..7997 (two repeats); the last beat (7999)
+    // has an upper-half error, so LAST_SEQ is word 0 of beat 7998 = 7996 * WPB
+    check_chk("errors", 8000, WPB > 1 ? 13 : 10, 0, 0, 0, 7996 * WPB);
 
     // ---------------- 4. Gaps ----------------
     $display("--- 4. injected gaps: 1, 5, 1000, 3 (+ 7 before the first beat)");
@@ -471,7 +509,7 @@ module tb_fdrec_check;
     gap_at[50] = 1; gap_at[51] = 5; gap_at[4000] = 1000; gap_at[9999] = 3;
     start_play(10000, 32'h8000_0000);
     wait_done();
-    check_chk("gaps", 10000, 0, 4, 1009, 0, 7 + 10000 - 1 + 1009);
+    check_chk("gaps", 10000, 0, 4, 1009, 0, (7 + 10000 - 1 + 1009) * WPB);
 
     // ---------------- 5. Throttle rate accuracy ----------------
     $display("--- 5. throttle rate accuracy");
@@ -514,7 +552,7 @@ module tb_fdrec_check;
     wait_done();
     repeat (1000) @(posedge src_clk);       // trailing idle
     if (ref_uf < 1500) fail($sformatf("starve: only %0d reference underflows", ref_uf));
-    check_chk("starve", 6000, 0, 0, 0, ref_uf, 5999);
+    check_chk("starve", 6000, 0, 0, 0, ref_uf, 5999 * WPB);
 
     // ---------------- 7. Slow sink: backpressure, no loss ----------------
     $display("--- 7. slow sink: rate 0.1, DMA full speed, 6000 beats");
@@ -532,27 +570,28 @@ module tb_fdrec_check;
     if (v < EDEPTH - 8)  fail($sformatf("slow: EGR_FIFO_LEVEL %0d while backpressured", v));
     if (stall_cycles < 1000) fail("slow: no backpressure seen on the MM2S stream");
     wait_done();
-    check_chk("slow", 6000, 0, 0, 0, 0, 5999);
+    check_chk("slow", 6000, 0, 0, 0, 0, 5999 * WPB);
     read64(EGR_BEATS_IN_LO, q);   check("slow EGR_BEATS_IN delta", q - q0, 6000);
     check("slow: reference queue empty (no loss)", ref_q.size(), 0);
 
     // ---------------- 7b. Upstream stall bridged by the FIFO ----------------
-    $display("--- 7b. full-rate sink, DMA stalls for 4000 and then 4600 sink-beat times");
+    $display("--- 7b. sink 0.8 beat/clk, DMA stalls for 4000 and then 4600 sink-beat times");
     dma_reset_model();
-    // DMA 250 MHz vs sink 200 MHz: the FIFO refills at 50 M beats/s after a stall
-    start_play(60000, 32'h8000_0000);       // primed: FIFO full, sink 1 beat/clk
+    // DMA 250 M beats/s vs sink 200 M beats/s (0.8 x 250 MHz): the FIFO
+    // refills at 50 M beats/s after a stall. 1 sink-beat time = 1.25 src_clk.
+    start_play(60000, 32'h6666_6666);       // primed: FIFO full, sink 0.8 beat/clk
     while (dma_sent < 8000) @(posedge dp_clk);
     if (dut.u_egress.fifo_level < EDEPTH - 16) fail("stall: FIFO not full before the stall");
-    dma_pct = 0; repeat (4000) @(posedge src_clk); dma_pct = 100;
+    dma_pct = 0; repeat (5000) @(posedge src_clk); dma_pct = 100;
     while (dut.u_egress.fifo_level < EDEPTH - 16) @(posedge dp_clk);
     read64(CHK_UNDERFLOWS_LO, q);
     $display("stall 4000: UNDERFLOWS %0d (ref %0d)", q, ref_uf);
     check("stall 4000: UNDERFLOWS", q, 0);
-    dma_pct = 0; repeat (4600) @(posedge src_clk); dma_pct = 100;
+    dma_pct = 0; repeat (5750) @(posedge src_clk); dma_pct = 100;
     wait_done();
     $display("stall 4600: ref underflows %0d", ref_uf);
     if (ref_uf < 300 || ref_uf > 700) fail($sformatf("stall 4600: %0d reference underflows", ref_uf));
-    check_chk("stall", 60000, 0, 0, 0, ref_uf, 59999);
+    check_chk("stall", 60000, 0, 0, 0, ref_uf, 59999 * WPB);
 
     // ---------------- 8. RESET, FLUSH, SOFT_RST ----------------
     $display("--- 8. CHK_CTRL.RESET, EGR_CTRL.FLUSH, SOFT_RST while streaming");
@@ -608,7 +647,7 @@ module tb_fdrec_check;
     read64(EGR_DISCARD_LO, q);    check("SOFT_RST: EGR_DISCARD", q, 0);
     axi_read(CHK_CTRL, v);        check("SOFT_RST: CHK_CTRL", v, 0);
     axi_read(EGR_CTRL, v);        check("SOFT_RST: EGR_CTRL", v, 0);
-    axi_read(CHK_RATE_INC, v);    check("SOFT_RST: CHK_RATE_INC kept", v, 32'h8000_0000);
+    axi_read(CHK_RATE_INC, v);    check("SOFT_RST: CHK_RATE_INC kept", v, 32'h6666_6666);  // set in 7b
     read_chk(b, e, g, gb, u, l);
     check("SOFT_RST BEATS", b, 0); check("SOFT_RST ERRORS", e, 0);
     check("SOFT_RST GAPS", g, 0);  check("SOFT_RST LAST_SEQ", l, 0);
@@ -618,10 +657,10 @@ module tb_fdrec_check;
     gap_at[0] = 123456;
     start_play(3000, 32'h8000_0000);
     wait_done();
-    check_chk("after SOFT_RST", 3000, 0, 0, 0, 0, 123456 + 2999);
+    check_chk("after SOFT_RST", 3000, 0, 0, 0, 0, (123456 + 2999) * WPB);
 
-    if (errors == 0) $display("PASS: tb_fdrec_check");
-    else             $display("FAIL: tb_fdrec_check (%0d errors)", errors);
+    if (errors == 0) $display("PASS: tb_fdrec_check DATA_WIDTH=%0d", DATA_WIDTH);
+    else             $display("FAIL: tb_fdrec_check DATA_WIDTH=%0d (%0d errors)", DATA_WIDTH, errors);
     $finish;
   end
 

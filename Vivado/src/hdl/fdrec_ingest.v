@@ -5,6 +5,7 @@
 // fdrec_ingest -- clock-domain crossing FIFO with drop counting
 //
 //   * s_axis (src_clk) -> xpm_fifo_async -> fifo_* (dp_clk, first-word-fall-through)
+//   * DATA_WIDTH-bit beats (128 or 256); FIFO_DEPTH and the counters are in beats.
 //   * s_axis_tready is always 1: the source is never stalled. A beat offered
 //     while the FIFO is full is dropped and counted (drop_count).
 //   * beats_in counts every beat offered by the source (accepted + dropped).
@@ -18,13 +19,14 @@
 `timescale 1ns / 1ps
 
 module fdrec_ingest #(
-  parameter integer FIFO_DEPTH = 16384,  // beats; power of 2, 16..131072
+  parameter integer DATA_WIDTH = 256,    // 128 or 256
+  parameter integer FIFO_DEPTH = 8192,   // beats; power of 2, 16..131072
   parameter integer CDC_STAGES = 3
 ) (
   // Source side (src_clk)
   input  wire          src_clk,
   input  wire          src_srst,          // active-high reset, src_clk domain
-  input  wire [127:0]  s_axis_tdata,
+  input  wire [DATA_WIDTH-1:0] s_axis_tdata,
   input  wire          s_axis_tvalid,
   output wire          s_axis_tready,
   output reg  [63:0]   beats_in,
@@ -32,7 +34,7 @@ module fdrec_ingest #(
 
   // Datapath side (dp_clk), first-word-fall-through read port
   input  wire          dp_clk,
-  output wire [127:0]  fifo_tdata,
+  output wire [DATA_WIDTH-1:0] fifo_tdata,
   output wire          fifo_tvalid,
   input  wire          fifo_tready,
   output wire [$clog2(FIFO_DEPTH):0] fifo_count,  // occupancy seen from dp_clk
@@ -70,8 +72,8 @@ module fdrec_ingest #(
   xpm_fifo_async #(
     .FIFO_MEMORY_TYPE    ("block"),
     .FIFO_WRITE_DEPTH    (FIFO_DEPTH),
-    .WRITE_DATA_WIDTH    (128),
-    .READ_DATA_WIDTH     (128),
+    .WRITE_DATA_WIDTH    (DATA_WIDTH),
+    .READ_DATA_WIDTH     (DATA_WIDTH),
     .READ_MODE           ("fwft"),
     .FIFO_READ_LATENCY   (0),
     .CDC_SYNC_STAGES     (CDC_STAGES),

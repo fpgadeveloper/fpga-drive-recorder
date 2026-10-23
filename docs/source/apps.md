@@ -7,7 +7,7 @@ The Linux image contains five recorder tools, in `/usr/bin`:
 | `fdsetup-raid0.sh` | Prepare the recording filesystem: RAID0 across both SSDs, or a single SSD, mounted at `/mnt/rec` |
 | `fdrec` | Record the fabric data stream to a file (zero-copy, io_uring + `O_DIRECT`) |
 | `fdplay` | Play a recording back into the fabric (zero-copy, io_uring `O_DIRECT` reads → AXI DMA MM2S), verified by the hardware checker |
-| `fdverify` | Verify a recording beat by beat |
+| `fdverify` | Verify a recording word by word |
 | `fdbench.sh` | Sweep the generator rate to find the sustained recording rate |
 
 It also contains the four `dd` speed-test scripts of fpga-drive-aximm-pcie
@@ -27,6 +27,14 @@ make -C sw/fdrec-apps CC=aarch64-linux-gnu-gcc LIBURING_CFLAGS=-I<liburing>/incl
 
 All of them need root (or access to `/dev/fdrec0` and the block devices). Every tool prints
 its options with `--help`.
+
+**Units.** The tools take the size of a fabric beat from the driver (`fdrec_info.beat_bytes`,
+the `beat_bytes` sysfs attribute): 32 bytes on the 256-bit reference designs, 16 on a
+128-bit datapath. Drop counts, FIFO depths and high-water marks, and the checker's
+counters are in these beats. The test pattern, and so `fdverify`, works on 16-byte words; a
+32-byte beat carries two of them (see [File format](file_format)). The driver's probe line in
+the kernel log (`fdrec_core v1.2`) and the `version` sysfs attribute give the version of the
+hardware's register map; the driver's own version is `modinfo -F version fdrec` (1.3).
 
 ## Quick start
 
@@ -100,6 +108,7 @@ fdrec [options] <output-file>
   --buf-size <bytes>    buffer size, multiple of 2 MB (default 8 MB)
   --qd <n>              io_uring queue depth: writes in flight (default 8)
   --no-tpg              do not touch the generator (user's own data source)
+  --no-write            run the DMA ring but write nothing (no <output-file>)
   --timeout <sec>       stall watchdog: abort cleanly when no buffer completes
                         for this long (default 10)
   --stats <sec>         live stats interval, 0 = off (default 1)
@@ -133,20 +142,40 @@ What it does:
 
 The live stats line (every `--stats` seconds, on stderr) shows elapsed time, instantaneous
 and average write rate (MB/s = 10^6 bytes/s), total data, writes in flight, the ingest FIFO
-high-water mark against its depth, and the drop count:
+high-water mark against its depth (in beats), and the drop count (in beats):
 
 ```
-     12.0s   1000.2 MB/s (avg   999.8)       11.998 GB  inflight  2  fifo_hwm     1/16384  drops 0
+     12.0s   1000.2 MB/s (avg   999.8)       11.998 GB  inflight  2  fifo_hwm     1/8192  drops 0
 ```
 
 The summary ends with one machine-readable line, used by `fdbench.sh`:
 
 ```
-RESULT bytes=10737418240 seconds=10.737 rate_bps=1000000000 drops=0 fifo_hwm=1 fifo_depth=16384 error=0
+RESULT bytes=10737418240 seconds=10.737 rate_bps=1000000000 drops=0 fifo_hwm=1 fifo_depth=8192 error=0 beat_bytes=32 no_write=0
 ```
 
 Exit codes: **0** = recording complete with zero dropped beats, **2** = beats were dropped (the
 recording is not valid), **1** = error, including a stall.
+
+**Without an SSD (`--no-write`).** `fdrec --no-write [options]` runs everything up to the
+memory exactly as a recording does -- the source, the ingest FIFO, the AXI DMA into the
+hugepage ring through the HP port (Zynq UltraScale+) or the NoC (Versal), the descriptor
+chain and the buffer recycling with its cache maintenance -- but hands every filled buffer
+straight back to the DMA: no output file is created and no file I/O is issued. It measures
+the fabric → DDR path on its own, for example the highest generator rate a board sustains
+before any SSD is involved:
+
+```
+sudo fdrec --no-write --rate 8000MB --size 64G
+```
+
+* Give no `<output-file>` (`fdrec` refuses one with `--no-write`, so a forgotten file name
+  cannot be mistaken for a recording). `--qd` has no effect.
+* `--size` and `--duration` count the bytes the DMA delivered; the stall watchdog, the live
+  stats and the summary work as for a recording (the rates are the DMA's).
+* The exit codes are the same: **0** = no beat dropped, **2** = beats were dropped (the path
+  did not keep up with the source), **1** = error or stall. The `RESULT` line carries
+  `no_write=1`.
 
 **Stall watchdog (`--timeout`).** If no buffer has been filled by the DMA or written to the
 file for `--timeout` seconds (default 10, must be greater than 0), `fdrec` prints
@@ -160,18 +189,45 @@ timeout for bursty or slow sources. Below about 0.8 MB/s one 8 MB buffer takes m
 What a stall looks like in the kernel log, and why it is harmless, is described in
 [Troubleshooting](troubleshooting.md#recording-stops-with-recording-stalled-exit-code-1).
 
-**Ring size (`--buffers`).** The ring absorbs the time an SSD takes to complete a write. The
-default of 32 × 8 MB (256 MB) covers a write stall of about 128 ms at 2 GB/s. 16 × 8 MB
-(128 MB, 75 ms at 1.7 GB/s) proved too few at 1.7 GB/s right after an `fstrim`, when the
-first writes took more than 100 ms to complete (see
-[Benchmarks](benchmarks.md#the-fstrim-finding-and-the-ring-size)).
+**Ring size (`--buffers`, `--buf-size`).** The ring absorbs the time an SSD takes to complete
+a write. The default of 32 × 8 MB (256 MB) covers a write stall of about 128 ms at 2 GB/s, but
+only 57 ms at 4.5 GB/s and 39 ms at 6.5 GB/s. At high rates use a 512 MB ring, the whole
+hugepage pool of the image: `--buffers 64` (64 × 8 MB) or `--buf-size 16M` (32 × 16 MB, which
+also halves the number of buffer boundaries). Measured with RAID0 pairs (see
+[Benchmarks](benchmarks.md#start-up-stalls-and-the-ring-size)):
+
+* **Zynq UltraScale+**: `--buffers 64` above ~3.5 GB/s with the Sabrent Rocket 2230 1TB pair and
+  above ~4.5 GB/s with the Samsung 980 PRO 1TB pair (on `zcu106_hpc0` they recorded 4500 and
+  5000 MB/s cleanly only with it).
+* **Versal**: `--buf-size 16M` above ~4 GB/s with the Sabrent pair and above ~6.5 GB/s with the
+  980 PRO pair (on `vck190_fmcp1` both recorded 7000 MB/s cleanly with it; with the default ring
+  the Sabrent pair was clean up to 4000 MB/s and the 980 PRO pair up to 6500 MB/s).
+
+A ring larger than 512 MB needs more hugepages.
+
+**NVMe power saving (APST) and the first writes.** After idle time, NVMe drives with APST
+(enabled by the kernel by default, and in this image) may be in a deep power state when a
+recording starts, and its first writes then complete late: two Sabrent Rocket 2230 1TB in RAID0
+on `vck190_fmcp1` took ~63-65 ms after 60 s of idle time and lost data at 4500-5000 MB/s with
+the default ring, in one gap right after the first pass through the ring. A 512 MB ring covers
+it, or turn APST off before recording, per controller (until the next reboot):
+
+```
+echo 0 | sudo tee /sys/class/nvme/nvme0/power/pm_qos_latency_tolerance_us
+echo 0 | sudo tee /sys/class/nvme/nvme1/power/pm_qos_latency_tolerance_us
+```
+
+or for every drive with `nvme_core.default_ps_max_latency_us=0` on the kernel command line
+(not tested). APST off costs the drives' idle power savings; see
+[Benchmarks](benchmarks.md#start-up-stalls-and-the-ring-size).
 
 Notes:
 
 * With `--size`, the size is rounded up to a multiple of 4096 bytes (an `O_DIRECT`
   requirement) and the last buffer is written only partly.
 * A recording always consists of whole beats in order; when it stops, buffers that were
-  filled but not yet written are discarded.
+  filled but not yet written are discarded. The header records the beat size
+  (`beat_bytes`, from the driver).
 * The file must be on a filesystem that supports `O_DIRECT` (XFS and ext4 do; tmpfs does not).
 
 ## fdplay
@@ -195,14 +251,15 @@ Plays a recording back into the FPGA fabric: file → `O_DIRECT` reads into huge
 the buffers and the AXI DMA reads the same buffers. Each buffer is one AXI-Stream packet
 (TLAST on its last beat). In the reference design the sink is the `fdrec_check` checker,
 which models a DAC: it consumes one beat per throttle tick (`--rate`, same scheme as the test
-pattern generator, default every `src_clk` cycle = 3.2 GB/s) and checks every beat of a test
-pattern recording in hardware.
+pattern generator, default every `src_clk` cycle = `SRC_CLK_HZ` × `beat_bytes`, 8 GB/s at
+250 MHz × 32 B) and checks every word of every beat of a test pattern recording in hardware.
 
 What it does:
 
 1. Reads and checks the file header (see [File format](file_format)). It plays `data_bytes`
-   (a recording without the COMPLETE flag: everything after the header). Without
-   `--no-check` the file must be a test-pattern recording.
+   (a recording without the COMPLETE flag: everything after the header), in whole beats of
+   the design: trailing bytes that do not fill a beat are not played (a note says so).
+   Without `--no-check` the file must be a test-pattern recording.
 2. Allocates and registers the buffers for playback (`FDREC_DIR_PLAY`).
 3. `PLAY_START`: unless `--no-check` is given, the checker is reset before any data can
    reach it, so the first beat of the file sets its expected sequence number; the driver
@@ -213,8 +270,8 @@ What it does:
    One io_uring wait covers "read done" and "buffer played" (a poll request on
    `/dev/fdrec0`).
 5. After the last buffer, waits until the sink has taken every beat (the egress FIFO holds up
-   to `EGR_FIFO_DEPTH` beats -- 4096 in the reference design -- after the DMA is done), then
-   stops and reads the checker counters.
+   to `EGR_FIFO_DEPTH` beats -- 4096 × 32 B = 128 KB in the reference designs -- after the
+   DMA is done), then stops and reads the checker counters.
 
 The live stats line shows elapsed time, instantaneous and average playback rate (bytes the
 DMA has read), total data, reads in flight, buffers owned by the DMA, and the checker's
@@ -228,15 +285,21 @@ The summary prints the checker counters, any problem found, and one machine-read
 
 ```
 fdplay: /mnt/rec/test.dat: 10737418240 of 10737418240 bytes (1280 buffers) in 10.74 s, 1000.0 MB/s
-fdplay: checker: beats 671088640 (expected 671088640), errors 0, gaps 0, gap beats 0 (recording drop_count 0), underflows 0, last seq 671088639, sink rate 1000.0 MB/s
-RESULT bytes=10737418240 seconds=10.737 sink_rate_bps=1000000000 beats=671088640 errors=0 gaps=0 gap_beats=0 drop_count=0 underflows=0 egr_discard=0 max_reads=8 complete=1 error=0
+fdplay: checker: beats 335544320 (expected 335544320, 32 bytes each), errors 0, gaps 0, gap beats 0 (recording drop_count 0), underflows 0, last seq 671088638, sink rate 1000.0 MB/s
+RESULT bytes=10737418240 seconds=10.737 sink_rate_bps=1000000000 beats=335544320 errors=0 gaps=0 gap_beats=0 drop_count=0 underflows=0 egr_discard=0 max_reads=8 complete=1 error=0 beat_bytes=32 file_beat_bytes=32
 ```
+
+The checker counts beats (`beats`, `gap beats`), while `last seq` is the sequence number of
+word 0 of the last beat, in 16-byte words: 10 GiB are 671 088 640 words in 335 544 320 beats
+of two words, and the last beat starts with word 671 088 638.
 
 Exit codes: **0** = playback complete and, with the checker, ERRORS = 0, UNDERFLOWS = 0,
 GAP_BEATS = the recording's `drop_count`, the checker saw every beat and the first beat it
 saw is the header's `first_seq`; **2** = complete, but the checker found a problem; **1** =
 error or incomplete playback (Ctrl-C, read error, stall). With `--no-check`, 0 means a
-complete playback.
+complete playback. GAP_BEATS and `drop_count` are compared as missing 16-byte words (beats ×
+`beat_bytes` / 16 of the design and of the recording respectively), so a recording made with
+another beat size is judged correctly.
 
 Notes:
 
@@ -245,17 +308,24 @@ Notes:
   A playback at a sink rate below the drive's sustained read rate must show 0; above it, the
   ring drains and underflows appear. Underflow ticks after the last beat of the file are not
   counted, so a complete playback reads 0 unless it starved.
-* A recording made with drops still plays cleanly: the checker counts the missing sequence
-  numbers as GAP_BEATS, which must equal the header's `drop_count` -- an end-to-end check that
-  the file, the read path and the MM2S are lossless.
+* A recording made with drops still plays cleanly: the checker counts the missing beats as
+  GAP_BEATS, which must equal the header's `drop_count` -- an end-to-end check that the file,
+  the read path and the MM2S are lossless.
+* **Recordings made with 16-byte beats** (a 128-bit datapath) play on a 256-bit design: the
+  file is the same byte stream of 16-byte words. A clean recording verifies exactly. One
+  with drops can have gaps of an odd number of words, which the 32-byte checker cannot
+  represent: such a gap is truncated in GAP_BEATS, or counted as a bad beat when it falls in
+  the middle of a beat, and `fdplay` then reports a problem (it prints a note at the start).
+  If the recording has an odd number of words, its last word is not played (not a whole
+  32-byte beat).
 * `--no-check` is for your own sink in place of `user_data_sink` (see
   [Replacing the checker with your own data sink](custom_sink)). On the reference design the
   checker *is* the sink and holds TREADY low while disabled: enable it by hand
   (`echo 1 > /sys/class/misc/fdrec0/chk_enable`, optionally `chk_rate_bps`) or the stream
   stalls and `fdplay` gives up after `--timeout`.
-* The default sink rate (every clock, 3.2 GB/s) is above any SSD's read rate here, so a
-  checked playback without `--rate` normally reports underflows; use `--rate` below the
-  drive's read rate.
+* The default sink rate (every clock, 8 GB/s) is above the read rate of the SSDs measured
+  here, so a checked playback without `--rate` normally reports underflows; use `--rate`
+  below the drive's read rate.
 * `fdplay` and `fdrec` cannot run at the same time (one opener of `/dev/fdrec0`).
 
 ### Tuning: the FIFO budget at buffer boundaries
@@ -273,11 +343,11 @@ patch), measured on a Zynq UltraScale+ target as about 9 µs with a tail of 15-2
 
     FIFO bytes / rate  >  ~15 µs
 
-| FIFO | Size | Covers 15 µs up to |
-|------|------|--------------------|
-| ingest (recording) | 16384 beats = 256 KB | 17 GB/s (above the 3.2 GB/s source maximum; the FIFO lasts 82 µs at 3.2 GB/s) |
-| egress (playback) | 4096 beats = 64 KB | 4.4 GB/s |
-| (a 512-beat FIFO, for comparison) | 8 KB | ~550 MB/s |
+| FIFO | Size | At 8 GB/s it lasts | Covers 15 µs up to |
+|------|------|--------------------|--------------------|
+| ingest (recording) | 8192 beats × 32 B = 256 KB | 32 µs | 17 GB/s (above the 8 GB/s source maximum) |
+| egress (playback) | 4096 beats × 32 B = 128 KB | 16 µs | 8.7 GB/s (above the 8 GB/s sink maximum) |
+| (a 512-beat FIFO of 32-byte beats, for comparison) | 16 KB | 2 µs | ~1.1 GB/s |
 
 In the fallback the 15-20 µs tail is typical, not a hard bound: on a Cortex-A53 target an
 interrupt is rarely several hundred µs late, more than any FIFO here covers, which is why the
@@ -285,16 +355,19 @@ driver keeps the DMA chained across boundaries.
 
 The interrupt latency still matters in one place: each buffer's completion interrupt lets
 the driver append the next free buffer to the chain, and with two buffers queued behind the
-one being transferred it has two buffer periods (5.2 ms at 3.2 GB/s with 8 MiB buffers) to do
+one being transferred it has two buffer periods (2.1 ms at 8 GB/s with 8 MiB buffers) to do
 so. The driver pins the AXI DMA interrupts to a CPU of their own (`dma_irq_cpu`, default the
 last online CPU), away from CPU0 of a Zynq UltraScale+ target, where they would queue behind
 the NVMe completion bursts.
 
 Within the budget, underflows (playback) or drops (recording) mean the SSD or filesystem is
 too slow. `fdplay` and `fdrec` print a warning when the programmed rate exceeds the budget of
-the design's FIFO (read from `EGR_FIFO_DEPTH` / `ING_FIFO_DEPTH`). With driver 1.2 that warning
-concerns only the fallback: with the chain in place the ingest FIFO's high-water mark stays at
-1-7 beats up to 3200 MB/s (see [Benchmarks](benchmarks.md#5-latency-budgets-not-bandwidth)). Larger buffers
+the design's FIFO (read from `EGR_FIFO_DEPTH` / `ING_FIFO_DEPTH`, times the beat size). The
+warning concerns only the fallback, and says so: with the chain in place the FIFO bridges
+the DMA's descriptor fetch, and the ingest FIFO high-water mark that `fdrec` reports
+(`fifo_hwm`) shows how little of it a recording uses (see
+[Benchmarks](benchmarks.md#5-latency-budgets-not-bandwidth)). With the reference designs'
+FIFOs the warning does not appear at any rate up to the 8 GB/s maximum. Larger buffers
 (`--buf-size`) mean fewer boundaries and more time for the recycling. A custom sink or source
 with its own buffering adds to the FIFO.
 
@@ -302,28 +375,35 @@ with its own buffering adds to the FIFO.
 
 ```
 fdverify [options] <file>
-  --max-errors <n>   print at most n discontinuities and n corrupted beats (default 20)
+  --max-errors <n>   print at most n discontinuities and n corrupted words (default 20)
   --header-only      only parse and print the header
   --pattern          check the test pattern even if the header says the source was not the TPG
   -q, --quiet        no progress output
 ```
 
-Prints the header, then streams the data with large reads and checks every beat:
-`upper == ~lower` and `lower == previous + 1`. It reports the total beats, the first and last
-sequence numbers, each discontinuity (beat index, file offset, expected and found sequence
-number, gap size; the printed list is capped by `--max-errors`, but all are counted), each
-corrupted beat, and compares the beat count with `data_bytes` and the missing beats with the
-header's `drop_count`:
+Prints the header, then streams the data with large reads and checks every 16-byte pattern
+**word**: `upper == ~lower` and `lower == previous + 1`. The check is the same for recordings
+with 16-byte and 32-byte beats (the header's `beat_bytes`; a 32-byte beat holds two words).
+It reports the total words (and beats), the first and last sequence numbers, each
+discontinuity (word index, file offset, expected and found sequence number, gap size in
+words; the printed list is capped by `--max-errors`, but all are counted), each corrupted
+word, and compares the size with `data_bytes` and the missing words with the header's
+`drop_count`. `drop_count` is in beats; a dropped beat leaves a gap of `beat_bytes` / 16
+words at a beat boundary, so fdverify compares the missing words with `drop_count` ×
+`beat_bytes` / 16 -- the same relation as between the checker's GAP_BEATS (beats) and the
+words missing in the file. A gap that is not a whole beat at a beat boundary, or data that
+is not a whole number of beats, is reported as a problem of its own (corruption, not a
+drop):
 
 ```
-GAP at beat 1048576 (file offset 16781312): expected 1048576, found 1052672, 4096 beats missing
-  beats           671088640 (10737418240 bytes)
-  discontinuities 1, beats missing 4096
-note: missing beats match the header drop_count exactly
+GAP at word 2097152 (file offset 33558528): expected 2097152, found 2105344, 8192 words missing
+  words           671088640 (10737418240 bytes, 335544320 beats of 32 bytes)
+  discontinuities 1, words missing 8192 (4096 beats)
+note: missing words match the header drop_count exactly (4096 beats x 2 words)
 RESULT FAIL
 ```
 
-Exit code **0** only for a clean file: complete header, consistent size, no corrupted beats,
+Exit code **0** only for a clean file: complete header, consistent size, no corrupted words,
 no discontinuities and `drop_count` 0. **1** if any problem was found, **2** on a usage or I/O
 error. For a recording of your own data source (header flag bit0 clear), only the header is
 checked unless `--pattern` is given.
@@ -334,13 +414,21 @@ checked unless `--pattern` is given.
 fdbench.sh [options]
   --dir <dir>          directory on the SSD filesystem (default /mnt/rec)
   --size <bytes>       data per step (default 32G)
-  --from <MB/s>        first rate (default 250)
-  --to <MB/s>          last rate (default: generator maximum, src_clk x 16)
-  --step <MB/s>        rate step (default 250)
+  --from <MB/s>        first rate (default 500)
+  --to <MB/s>          last rate (default: generator maximum, src_clk x beat_bytes)
+  --step <MB/s>        rate step (default 500)
   --stop-on-fail       stop at the first failing rate
   --keep               keep the recordings
   --fdrec-args "<..>"  extra fdrec options (e.g. "--buffers 32 --qd 16")
 ```
+
+The default sweep runs from 500 MB/s in 500 MB/s steps up to the generator maximum,
+`SRC_CLK_HZ` × `beat_bytes` read from sysfs: 8000 MB/s on the 256-bit reference designs
+(250 MHz × 32 B), 16 steps. (With a driver older than 1.3, which has no `beat_bytes`
+attribute, it assumes the 16-byte beats of a 128-bit datapath.) Steps above the board's
+SSD write rate drop beats and still record `--size` bytes each: add `--stop-on-fail`, or
+narrow the sweep with `--from` / `--to` / `--step` (for example `--from 2000 --to 3500 --step
+250` around a drive's limit).
 
 For each rate it records `--size` bytes with `fdrec --rate`, verifies the file with
 `fdverify`, deletes it and prints one table row. A step whose recording stalled (`fdrec`
@@ -349,9 +437,9 @@ exit code 1, see `--timeout`) is reported as `ERROR`:
 ```
  rate MB/s  result           drops    fifo_hwm/depth      avg MB/s    fdverify
  ---------  ------           -----    --------------      --------    --------
-       250  PASS                 0           1/16384         250.0        PASS
+       500  PASS                 0            1/8192         500.0        PASS
        ...
-      1750  DROPS          1234567       16385/16384        1702.3        gaps
+      2000  DROPS          1234567         8193/8192        1952.3        gaps
 
 fdbench: sustained recording rate: 1500 MB/s (/dev/md0, xfs, 32G per step)
 ```
@@ -360,7 +448,7 @@ The highest passing rate is the **sustained recording rate** of that board + SSD
 filesystem. The default 32 GB per step is large enough to exhaust the SLC write cache of
 typical smaller SSDs, so the result is the sustained rate rather than the cache rate; use a
 larger `--size` for drives with very large caches (the 1 TB drives on the
-[Benchmarks](benchmarks.md#long-recordings-past-the-slc-cache) page cache 70-125 GB each, so
+[Benchmarks](benchmarks.md#long-recordings-past-the-slc-cache) page cache 66-125 GB each, so
 32 GB stays inside the cache), or confirm the result with one `fdrec` recording longer than
 the cache. Run it once on a single drive
 (`fdsetup-raid0.sh --single`) and once on RAID0; the [Benchmarks](benchmarks) page has

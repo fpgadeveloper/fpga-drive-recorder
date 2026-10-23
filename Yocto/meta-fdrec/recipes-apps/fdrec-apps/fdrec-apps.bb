@@ -13,6 +13,10 @@ HOMEPAGE = "https://github.com/fpgadeveloper/fpga-drive-recorder"
 LICENSE = "MIT"
 LIC_FILES_CHKSUM = "file://${COMMON_LICENSE_DIR}/MIT;md5=0835ade698e0bcf8506ecda2f7b4f302"
 
+# Released together with the driver (fdrec-mod); 1.3: fabric beat size from
+# the driver (16 or 32 bytes), fdrec --no-write, fdverify per 16-byte word.
+PV = "1.3"
+
 DEPENDS = "liburing"
 
 # Sources come straight from this repository: sw/fdrec-apps plus the shared
